@@ -668,14 +668,15 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
     now = ngx_time();
 
     if (c->fine_deadline) {
-        int64_t  age;
+        int64_t  msec;
 
-        age = ngx_http_cache_now_ms() - c->fine_deadline;
-        if (age < 0) {
+        msec = ngx_http_cache_now_ms();
+        rc = ngx_http_cache_fine_status(msec, c->fine_deadline, c->fine_window);
+        if (rc == NGX_HTTP_CACHE_HIT) {
             return NGX_OK;
         }
-        c->stale_updating = age < c->fine_window;
-        c->stale_error = age / 1000 < c->error_sec;
+        c->stale_updating = (rc == NGX_HTTP_CACHE_UPDATING);
+        c->stale_error = (msec - c->fine_deadline) / 1000 < c->error_sec;
 
     } else {
         if (c->valid_sec >= now) {

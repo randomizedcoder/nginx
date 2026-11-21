@@ -26,6 +26,21 @@
 ngx_int_t ngx_http_cache_fine_headers(ngx_http_request_t *r);
 int64_t ngx_http_cache_now_ms(void);
 
+static ngx_inline ngx_int_t
+ngx_http_cache_fine_status(int64_t now, int64_t deadline, int64_t window)
+{
+    if (now < deadline) {
+        return NGX_HTTP_CACHE_HIT;
+    }
+
+    if (now - deadline < window) {
+        return NGX_HTTP_CACHE_UPDATING;
+    }
+
+    return NGX_HTTP_CACHE_EXPIRED;
+}
+
+
 #define NGX_HTTP_CACHE_KEY_LEN       16
 #define NGX_HTTP_CACHE_ETAG_LEN      128
 #define NGX_HTTP_CACHE_VARY_LEN      128
