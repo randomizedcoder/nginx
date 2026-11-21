@@ -358,6 +358,7 @@ struct ngx_http_upstream_s {
     ngx_http_upstream_srv_conf_t    *upstream;
 #if (NGX_HTTP_CACHE)
     ngx_array_t                     *caches;
+    ngx_http_upstream_headers_in_t  *fine_validation;
 #endif
 
     ngx_http_upstream_headers_in_t   headers_in;

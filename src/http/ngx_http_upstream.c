@@ -2884,6 +2884,19 @@ ngx_http_upstream_test_next(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
         now = ngx_time();
 
+        if (r->cache->fine_deadline) {
+            u->fine_validation = ngx_palloc(r->pool, sizeof(u->headers_in));
+            if (u->fine_validation == NULL) {
+                ngx_http_upstream_finalize_request(r, u,
+                                             NGX_HTTP_INTERNAL_SERVER_ERROR);
+                return NGX_OK;
+            }
+            *u->fine_validation = u->headers_in;
+
+            /* Retire the old policy before replaying the validated body. */
+            ngx_http_file_cache_update_header(r);
+        }
+
         valid = r->cache->valid_sec;
         updating = r->cache->updating_sec;
         error = r->cache->error_sec;
@@ -2904,6 +2917,11 @@ ngx_http_upstream_test_next(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
         if (rc == NGX_HTTP_UPSTREAM_INVALID_HEADER) {
             rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        if (u->fine_validation) {
+            ngx_http_upstream_finalize_request(r, u, rc);
+            return NGX_OK;
         }
 
         if (valid == 0) {
@@ -6362,7 +6380,6 @@ ngx_http_upstream_cache_last_modified(ngx_http_request_t *r,
 
     if (r->upstream == NULL
         || !r->upstream->conf->cache_revalidate
-        || (r->cache && r->cache->fine_deadline)
         || r->upstream->cache_status != NGX_HTTP_CACHE_EXPIRED
         || r->cache->last_modified == -1)
     {
@@ -6391,7 +6408,6 @@ ngx_http_upstream_cache_etag(ngx_http_request_t *r,
 {
     if (r->upstream == NULL
         || !r->upstream->conf->cache_revalidate
-        || (r->cache && r->cache->fine_deadline)
         || r->upstream->cache_status != NGX_HTTP_CACHE_EXPIRED
         || r->cache->etag.len == 0)
     {

@@ -149,6 +149,98 @@ ngx_http_fine_add(ngx_http_request_t *r, ngx_str_t key, int64_t value)
 }
 
 
+static ngx_uint_t
+ngx_http_fine_metadata(ngx_str_t *key)
+{
+    ngx_uint_t        i;
+    static ngx_str_t  names[] = {
+        ngx_string("Age"), ngx_string("Age-Ms"), ngx_string("Cache-Control"),
+        ngx_string("Date"), ngx_string("ETag"), ngx_string("Expires"),
+        ngx_string("Vary"), ngx_string("Last-Modified"),
+        ngx_string("Content-Location"), ngx_string("Set-Cookie")
+    };
+
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (key->len == names[i].len
+            && ngx_strncasecmp(key->data, names[i].data, key->len) == 0)
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+
+/* Replace cached response metadata supplied by the validation exchange. */
+static ngx_int_t
+ngx_http_fine_validated(ngx_http_request_t *r)
+{
+    ngx_uint_t                       i, j;
+    ngx_table_elt_t                 *old, *new, *dst;
+    ngx_list_part_t                 *p, *v;
+    ngx_http_upstream_headers_in_t  *stored, *validation;
+
+    stored = &r->upstream->headers_in;
+    validation = r->upstream->fine_validation;
+
+    for (p = &stored->headers.part; p; p = p->next) {
+        old = p->elts;
+        for (i = 0; i < p->nelts; i++) {
+            if (!ngx_http_fine_metadata(&old[i].key)) {
+                continue;
+            }
+
+            /* Discard the old age sample even when the 304 omits Age. */
+            if (ngx_http_fine_name(old[i].key.data, old[i].key.len, "age", 3)
+                || ngx_http_fine_name(old[i].key.data, old[i].key.len,
+                                      "age-ms", 6))
+            {
+                old[i].hash = 0;
+                continue;
+            }
+
+            for (v = &validation->headers.part; v; v = v->next) {
+                new = v->elts;
+                for (j = 0; j < v->nelts; j++) {
+                    if (new[j].hash && new[j].key.len == old[i].key.len
+                        && ngx_strncasecmp(new[j].key.data, old[i].key.data,
+                                           new[j].key.len) == 0)
+                    {
+                        old[i].hash = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    for (v = &validation->headers.part; v; v = v->next) {
+        new = v->elts;
+        for (j = 0; j < v->nelts; j++) {
+            if (!new[j].hash || !ngx_http_fine_metadata(&new[j].key)) {
+                continue;
+            }
+            dst = ngx_list_push(&stored->headers);
+            if (dst == NULL) {
+                return NGX_ERROR;
+            }
+            *dst = new[j];
+            dst->next = NULL;
+        }
+    }
+
+    if (validation->cache_control) {
+        stored->cache_control = validation->cache_control;
+        stored->cache_restricted = validation->cache_restricted;
+    }
+    if (validation->last_modified) {
+        stored->last_modified_time = validation->last_modified_time;
+    }
+
+    return NGX_OK;
+}
+
+
 ngx_int_t
 ngx_http_cache_fine_headers(ngx_http_request_t *r)
 {
@@ -163,6 +255,10 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
 
     c = r->cache;
     u = r->upstream;
+    if (u->fine_validation && ngx_http_fine_validated(r) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
     ordinary = NULL;
     seconds = NGX_DECLINED;
     age = NGX_DECLINED;
@@ -195,7 +291,7 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
 
     now = ngx_http_cache_now_ms();
 
-    if (!r->cached) {
+    if (!r->cached || u->fine_validation) {
         c->fine_deadline = 0;
         if (!u->cacheable || u->headers_in.cache_restricted
             || u->headers_in.status_n != NGX_HTTP_OK

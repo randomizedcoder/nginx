@@ -1599,6 +1599,20 @@ ngx_http_file_cache_update_header(ngx_http_request_t *r)
         goto done;
     }
 
+    if (h.version == NGX_HTTP_CACHE_FINE_VERSION
+        && r->upstream->fine_validation && h.crc32 == c->crc32)
+    {
+        /*
+         * The cached header block can change length on a 304. Refill it
+         * on the next request, after serving this validated response.
+         * The file identity and length have been checked above.
+         */
+        h.version = 0;
+        (void) ngx_write_file(&file, (u_char *) &h.version,
+                              sizeof(h.version), 0);
+        goto done;
+    }
+
     if (h.version != NGX_HTTP_CACHE_VERSION
         || h.last_modified != c->last_modified
         || h.crc32 != c->crc32
