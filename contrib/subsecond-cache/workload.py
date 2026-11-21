@@ -73,7 +73,8 @@ pid nginx.pid;
 error_log logs/error.log notice;
 events {{ worker_connections 1024; }}
 http {{
-    log_format events '$msec $uri $status $upstream_cache_status';
+    log_format events '$msec $uri $status $upstream_cache_status '
+                      '$http_x_player_poll $sent_http_age $sent_http_age_ms';
     access_log logs/access.log events;
     proxy_cache_path cache keys_zone=demo:1m;
     server {{ listen 127.0.0.1:{listen}; {locations} }}
@@ -114,9 +115,14 @@ def player(number, url, start, stop, paced, seed):
         previous = now
         return stall
 
+    poll = 0
     while CLOCK() < stop:
         sent = CLOCK()
-        with urllib.request.urlopen(url + "/live.m3u8", timeout=5) as reply:
+        poll += 1
+        request_id = f"{number}-{poll}"
+        request = urllib.request.Request(url + "/live.m3u8",
+                                         headers={"X-Player-Poll": request_id})
+        with urllib.request.urlopen(request, timeout=5) as reply:
             names = [n for n in reply.read().decode().splitlines()
                      if n and not n.startswith("#")]
             status = reply.headers.get("X-Edge", "")
@@ -147,7 +153,7 @@ def player(number, url, start, stop, paced, seed):
             buffer += 1.0
             playing |= buffer >= 3
             events.append((number, seq, discovered, began, done, before, stall,
-                           missed, status, age))
+                           missed, status, age, request_id))
             last = seq
         wait_until(sent + (1.0 if fresh else 0.5))
     return events
@@ -166,16 +172,20 @@ def run(args, media, out, policy, paced, loaded, rep, mixed=False):
         def launch(name, binary, config):
             return stack.enter_context(server(out / name, binary, config))
 
-        def origin(name, header):
+        def origin(name, header, extra=""):
             return launch(name, args.nginx, f"""
                 root "{root}";
-                location = /live.m3u8 {{ add_header Cache-Control "{header}"; }}
+                location = /live.m3u8 {{ add_header Cache-Control "{header}"; {extra} }}
                 location / {{ add_header Cache-Control "max-age=60"; }}
             """)
 
         legacy = origin("origin-a", POLICIES["second" if policy == "second" else "zero"])
-        fine = origin("origin-b", POLICIES[policy])
-        origin_url = fine if policy in ("fine", "background") else legacy
+        replay = 'add_header Age 0; add_header Age-Ms 175;'
+        fine = origin("origin-b", "max-age=1, max-age-ms=200",
+                      replay) if mixed and policy == "second" else origin(
+                          "origin-b", POLICIES[policy])
+
+        origin_url = fine if mixed or policy in ("fine", "background") else legacy
 
         def proxy(name, upstream, binary, mode):
             option = f"proxy_cache_fine_time {mode};" if mode else ""
@@ -226,7 +236,7 @@ def run(args, media, out, policy, paced, loaded, rep, mixed=False):
         if loaded and load.wait(timeout=10):
             raise RuntimeError("wrk failed; see wrk.txt")
 
-    fields = "player seq published discovered fetch_start complete buffer_s stall_s missed edge age_ms"
+    fields = "player seq published discovered fetch_start complete buffer_s stall_s missed edge age_ms poll_id"
     with (out / "events.csv").open("w") as f:
         writer = csv.writer(f)
         writer.writerow(fields.split())
@@ -242,14 +252,20 @@ def run(args, media, out, policy, paced, loaded, rep, mixed=False):
             origin_gets += uri == "/live.m3u8" and window[0] <= float(stamp) < window[1]
     if not selected:
         raise RuntimeError("no measured segment discoveries")
-    if mixed and any(e[9] or e[8] == "HIT" for e in selected):
-        raise AssertionError("unknown path reused a zero-lifetime playlist")
+    if mixed and any(e[9] or (policy == "fine" and e[8] == "HIT") for e in selected):
+        raise AssertionError("mixed path violated its whole-second fallback")
+    # Allow a full target duration for discovery before the measurement ends.
+    cohort = {seq for seq, stamp in published.items()
+              if start + args.warmup <= stamp < stop - 1.0}
+    before_end = {(e[0], e[1]) for e in events if e[1] in cohort and e[2] < stop}
     stats = dict(policy=policy, paced=paced, load=loaded, rep=rep, mixed=mixed,
                  discoveries=len(selected), discovery_p50_ms=percentile(discovery, .5),
                  discovery_p95_ms=percentile(discovery, .95),
                  completion_p95_ms=percentile(completion, .95),
                  buffer_p05_s=percentile([e[5] for e in selected], .05),
                  stalled_player_seconds=sum(e[6] for e in selected),
+                 undiscovered_player_segments=args.players * len(cohort) - len(before_end),
+                 late_downloads=sum(e[6] > 0 for e in selected),
                  missed=sum(e[7] for e in selected),
                  origin_playlist_gets_per_segment=origin_gets / args.seconds)
     if loaded:
@@ -265,7 +281,7 @@ def run(args, media, out, policy, paced, loaded, rep, mixed=False):
     stats["sample"] = dict(player=sample[0], segment=sample[1],
                            published=published[sample[1]], discovered=sample[2],
                            fetch_start=sample[3], complete=sample[4],
-                           edge=sample[8], age_ms=sample[9])
+                           edge=sample[8], age_ms=sample[9], poll_id=sample[10])
     (out / "summary.json").write_text(json.dumps(stats, indent=2))
     print(json.dumps(stats), flush=True)
 
@@ -297,7 +313,9 @@ def main():
                 for policy in POLICIES:
                     run(args, media, root / f"{policy}-{rep}-{int(paced)}-{int(loaded)}",
                         policy, paced, loaded, rep)
-    run(args, media, root / "mixed", "fine", False, False, 0, mixed=True)
+    for policy in ("fine", "second"):
+        run(args, media, root / f"mixed-{policy}", policy, False, False, 0,
+            mixed=True)
 
 
 if __name__ == "__main__":
