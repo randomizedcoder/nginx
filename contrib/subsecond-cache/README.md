@@ -19,7 +19,7 @@ Run these from this directory in the Git checkout:
 nix build
 nix run .#demo
 nix run .#bench -- --output "$PWD/results"
-nix develop -c prove -v tests/proxy_cache_fine.t
+nix develop -c prove -v tests/proxy_cache_fine.t tests/cache_upgrade.t
 nix develop -c sh -c 'cd "$NGINX_TESTS" && prove -Ilib proxy_cache*.t'
 ```
 
@@ -41,7 +41,7 @@ Twenty staggered players track sequence numbers, reload at HLS intervals, downlo
 
 Each benchmark repetition uses the same player phases across policies. Compare zero, one second and 200 ms at a zero stale window first. The background-update case adds 200 ms of stale serving. Read unloaded and wrk-loaded runs separately. Each summary records discovery and completion lag, p05 buffer, stalled player-seconds, late downloads, missing observations and origin playlist GETs per publication. wrk's achieved rate and errors describe the offered workload. Percentiles are over player-segment observations within each run.
 
-Keep the per-run summary, events.csv, access logs and wrk.txt. The summary's sample poll ID joins player discovery and download times to the request on each tier that processed it. An edge hit needs no shield request. Use monotonic timestamps for player elapsed times and nginx wall timestamps for tier logs. The output directory holds temporary segment files and cache data as well as measurements. Use a fresh output path for each invocation.
+The top-level comparison.csv gives the median of the per-run metrics for each scenario. Keep the per-run summary, events.csv, access logs and wrk.txt. The summary's sample poll ID joins player discovery and download times to the request on each tier that processed it. An edge hit needs no shield request. Use monotonic timestamps for player elapsed times and nginx wall timestamps for tier logs. The output directory holds temporary segment files and cache data as well as measurements. Use a fresh output path for each invocation.
 
 ### Implementation limits for reviewers
 

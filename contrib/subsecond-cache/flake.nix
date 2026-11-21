@@ -44,6 +44,7 @@
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [ python3 ffmpeg-headless wrk perl pcre2 zlib ];
         TEST_NGINX_BINARY = "${patched}/sbin/nginx";
+        TEST_NGINX_BASELINE = "${baseline}/sbin/nginx";
         NGINX_TESTS = harness;
         PERL5LIB = "${harness}/lib";
       };

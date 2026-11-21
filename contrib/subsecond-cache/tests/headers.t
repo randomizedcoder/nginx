@@ -32,4 +32,17 @@ for my $case (@cases) {
     close $pipe or die "Header test exited $?";
     is($result, $expected, $name);
 }
+for my $test (
+    ['304 inherits lifetime', '', '185 0 15'],
+    ['304 replaces lifetime', 'max-age=0, max-age-ms=1250', '1235 0 15'],
+    ['304 switches to whole seconds', 'max-age=5', '0 0'],
+    ['304 disables reuse', 'no-store', '0 0'],
+) {
+    my ($name, $update, $expected) = @$test;
+    open my $pipe, '-|', $binary, 1, $pair, '', '9', '9000', $update
+        or die "Run validation test: $!";
+    chomp(my $result = <$pipe>);
+    close $pipe or die "Validation test exited $?";
+    is($result, $expected, $name);
+}
 done_testing();

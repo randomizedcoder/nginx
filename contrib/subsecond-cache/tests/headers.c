@@ -31,12 +31,13 @@ main(int argc, char **argv)
     ngx_http_request_t           r = { 0 };
     ngx_http_upstream_t          u = { 0 };
     ngx_http_upstream_conf_t     conf = { 0 };
+    ngx_http_upstream_headers_in_t validation = { 0 };
     ngx_http_upstream_state_t    state = { 0 };
     ngx_table_elt_t             *h, *line;
     ngx_list_part_t             *part;
     ngx_uint_t                   i;
 
-    if (argc != 6) {
+    if (argc != 6 && argc != 7) {
         return 2;
     }
     ngx_pagesize = 4096;
@@ -69,6 +70,22 @@ main(int argc, char **argv)
     }
     if (*argv[5]) {
         field(&u.headers_in.headers, "Age-Ms", argv[5]);
+    }
+
+    if (argc == 7) {
+        /* Raw headers came from the stored 200. Supply a separate 304. */
+        if (ngx_list_init(&validation.headers, r.pool, 4,
+                          sizeof(ngx_table_elt_t)) != NGX_OK)
+        {
+            return 2;
+        }
+        if (*argv[6]) {
+            validation.cache_control = field(&validation.headers,
+                                             "Cache-Control", argv[6]);
+        }
+        r.cached = 1;
+        cache.fine_deadline = 100;
+        u.fine_validation = &validation;
     }
 
     if (ngx_http_cache_fine_headers(&r) != NGX_OK) {

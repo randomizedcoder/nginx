@@ -8,6 +8,7 @@ import math
 import random
 import re
 import socket
+import statistics
 import subprocess
 import tempfile
 import time
@@ -180,11 +181,11 @@ def run(args, media, out, policy, paced, loaded, rep, mixed=False):
             """)
 
         legacy = origin("origin-a", POLICIES["second" if policy == "second" else "zero"])
-        replay = 'add_header Age 0; add_header Age-Ms 175;'
-        fine = origin("origin-b", "max-age=1, max-age-ms=200",
-                      replay) if mixed and policy == "second" else origin(
-                          "origin-b", POLICIES[policy])
-
+        if mixed and policy == "second":
+            fine = origin("origin-b", "max-age=1, max-age-ms=200",
+                          "add_header Age 0; add_header Age-Ms 175;")
+        else:
+            fine = origin("origin-b", POLICIES[policy])
         origin_url = fine if mixed or policy in ("fine", "background") else legacy
 
         def proxy(name, upstream, binary, mode):
@@ -286,6 +287,26 @@ def run(args, media, out, policy, paced, loaded, rep, mixed=False):
     print(json.dumps(stats), flush=True)
 
 
+def compare(root):
+    groups = {}
+    for summary in sorted(root.glob("*/summary.json")):
+        run_stats = json.loads(summary.read_text())
+        key = tuple(run_stats[k] for k in ("policy", "paced", "load", "mixed"))
+        groups.setdefault(key, []).append(run_stats)
+    metrics = ("discovery_p50_ms", "discovery_p95_ms", "completion_p95_ms",
+               "buffer_p05_s", "stalled_player_seconds", "late_downloads",
+               "undiscovered_player_segments", "origin_playlist_gets_per_segment")
+    # Preserve paired per-run observations in the original summaries.
+    with (root / "comparison.csv").open("w") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(("policy", "paced", "load", "mixed", "repetitions", *metrics))
+        for key, repetitions in sorted(groups.items()):
+            writer.writerow((*key, len(repetitions),
+                             *(statistics.median(r[m] for r in repetitions)
+                               for m in metrics)))
+    print(f"Comparison (median of per-run metrics): {root / 'comparison.csv'}")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("mode", choices=["demo", "bench"])
@@ -316,6 +337,7 @@ def main():
     for policy in ("fine", "second"):
         run(args, media, root / f"mixed-{policy}", policy, False, False, 0,
             mixed=True)
+    compare(root)
 
 
 if __name__ == "__main__":
