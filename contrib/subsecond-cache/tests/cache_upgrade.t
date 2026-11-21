@@ -35,7 +35,7 @@ CONF
 my $original = $config;
 $original =~ s/FINE//;
 {
-    local $ENV{TEST_NGINX_BINARY} = $baseline;
+    local $Test::Nginx::NGINX = $baseline;
     $t->write_file_expand('nginx.conf', $original)->run();
     like(http_get('/upgrade'), qr/^X-Cache: MISS\r?$/mi, 'baseline fills v5 entry');
     like(http_get('/upgrade'), qr/^X-Cache: HIT\r?$/mi, 'baseline reads v5 entry');
