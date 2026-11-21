@@ -156,6 +156,16 @@ static ngx_conf_post_t  ngx_http_proxy_lowat_post =
     { ngx_http_proxy_lowat_check };
 
 
+#if (NGX_HTTP_CACHE)
+static ngx_conf_enum_t  ngx_http_proxy_fine_time[] = {
+    { ngx_string("off"), 0 },
+    { ngx_string("origin"), NGX_HTTP_CACHE_FINE_ORIGIN },
+    { ngx_string("trusted"), NGX_HTTP_CACHE_FINE_TRUSTED },
+    { ngx_null_string, 0 }
+};
+#endif
+
+
 static ngx_conf_bitmask_t  ngx_http_proxy_next_upstream_masks[] = {
     { ngx_string("error"), NGX_HTTP_UPSTREAM_FT_ERROR },
     { ngx_string("timeout"), NGX_HTTP_UPSTREAM_FT_TIMEOUT },
@@ -523,6 +533,13 @@ static ngx_command_t  ngx_http_proxy_commands[] = {
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_proxy_loc_conf_t, upstream.cache_lock_age),
       NULL },
+
+    { ngx_string("proxy_cache_fine_time"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_enum_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_proxy_loc_conf_t, upstream.cache_fine_time),
+      &ngx_http_proxy_fine_time },
 
     { ngx_string("proxy_cache_revalidate"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
@@ -3615,6 +3632,7 @@ ngx_http_proxy_create_loc_conf(ngx_conf_t *cf)
     conf->upstream.cache_lock = NGX_CONF_UNSET;
     conf->upstream.cache_lock_timeout = NGX_CONF_UNSET_MSEC;
     conf->upstream.cache_lock_age = NGX_CONF_UNSET_MSEC;
+    conf->upstream.cache_fine_time = NGX_CONF_UNSET_UINT;
     conf->upstream.cache_revalidate = NGX_CONF_UNSET;
     conf->upstream.cache_convert_head = NGX_CONF_UNSET;
     conf->upstream.cache_background_update = NGX_CONF_UNSET;
@@ -3937,6 +3955,8 @@ ngx_http_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_msec_value(conf->upstream.cache_lock_age,
                               prev->upstream.cache_lock_age, 5000);
 
+    ngx_conf_merge_uint_value(conf->upstream.cache_fine_time,
+                              prev->upstream.cache_fine_time, 0);
     ngx_conf_merge_value(conf->upstream.cache_revalidate,
                               prev->upstream.cache_revalidate, 0);
 

@@ -3099,6 +3099,12 @@ ngx_http_upstream_process_headers(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
     umcf = ngx_http_get_module_main_conf(r, ngx_http_upstream_module);
 
+#if (NGX_HTTP_CACHE)
+    if (u->conf->cache_fine_time && ngx_http_cache_fine_headers(r) != NGX_OK) {
+        return NGX_ERROR;
+    }
+#endif
+
     if (u->headers_in.no_cache || u->headers_in.expired) {
         u->cacheable = 0;
     }
@@ -5137,6 +5143,7 @@ ngx_http_upstream_process_cache_control(ngx_http_request_t *r,
         || ngx_strlcasestrn(start, last, (u_char *) "no-store", 8 - 1) != NULL
         || ngx_strlcasestrn(start, last, (u_char *) "private", 7 - 1) != NULL)
     {
+        u->headers_in.cache_restricted = 1;
         u->headers_in.no_cache = 1;
         return NGX_OK;
     }
@@ -6355,6 +6362,7 @@ ngx_http_upstream_cache_last_modified(ngx_http_request_t *r,
 
     if (r->upstream == NULL
         || !r->upstream->conf->cache_revalidate
+        || (r->cache && r->cache->fine_deadline)
         || r->upstream->cache_status != NGX_HTTP_CACHE_EXPIRED
         || r->cache->last_modified == -1)
     {
@@ -6383,6 +6391,7 @@ ngx_http_upstream_cache_etag(ngx_http_request_t *r,
 {
     if (r->upstream == NULL
         || !r->upstream->conf->cache_revalidate
+        || (r->cache && r->cache->fine_deadline)
         || r->upstream->cache_status != NGX_HTTP_CACHE_EXPIRED
         || r->cache->etag.len == 0)
     {

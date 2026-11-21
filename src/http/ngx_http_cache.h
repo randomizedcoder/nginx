@@ -23,11 +23,18 @@
 #define NGX_HTTP_CACHE_HIT           7
 #define NGX_HTTP_CACHE_SCARCE        8
 
+ngx_int_t ngx_http_cache_fine_headers(ngx_http_request_t *r);
+int64_t ngx_http_cache_now_ms(void);
+
 #define NGX_HTTP_CACHE_KEY_LEN       16
 #define NGX_HTTP_CACHE_ETAG_LEN      128
 #define NGX_HTTP_CACHE_VARY_LEN      128
 
 #define NGX_HTTP_CACHE_VERSION       5
+#define NGX_HTTP_CACHE_FINE_VERSION  6
+
+#define NGX_HTTP_CACHE_FINE_ORIGIN   1
+#define NGX_HTTP_CACHE_FINE_TRUSTED  2
 
 
 typedef struct {
@@ -75,6 +82,10 @@ struct ngx_http_cache_s {
     time_t                           error_sec;
     time_t                           last_modified;
     time_t                           date;
+
+    int64_t                          fine_birth;
+    int64_t                          fine_deadline;
+    int64_t                          fine_window;
 
     ngx_str_t                        etag;
     ngx_str_t                        vary;

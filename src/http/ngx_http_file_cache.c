@@ -569,7 +569,9 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
 
     h = (ngx_http_file_cache_header_t *) c->buf->pos;
 
-    if (h->version != NGX_HTTP_CACHE_VERSION) {
+    if (h->version != NGX_HTTP_CACHE_VERSION
+        && !(h->version == NGX_HTTP_CACHE_FINE_VERSION
+             && r->upstream->conf->cache_fine_time && sizeof(time_t) >= 8)) {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "cache file \"%s\" version mismatch", c->file.name.data);
         return NGX_DECLINED;
@@ -628,6 +630,16 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
     c->last_modified = h->last_modified;
     c->date = h->date;
     c->valid_msec = h->valid_msec;
+    if (h->version == NGX_HTTP_CACHE_FINE_VERSION) {
+        /* Version 6 stores date, expiry and update window in milliseconds. */
+        c->fine_birth = h->date;
+        c->fine_deadline = h->valid_sec;
+        c->fine_window = h->updating_sec;
+        c->date /= 1000;
+        c->valid_sec /= 1000;
+        c->updating_sec /= 1000;
+    }
+
     c->body_start = h->body_start;
     c->etag.len = h->etag_len;
     c->etag.data = h->etag;
@@ -655,32 +667,43 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
 
     now = ngx_time();
 
-    if (c->valid_sec < now) {
+    if (c->fine_deadline) {
+        int64_t  age;
+
+        age = ngx_http_cache_now_ms() - c->fine_deadline;
+        if (age < 0) {
+            return NGX_OK;
+        }
+        c->stale_updating = age < c->fine_window;
+        c->stale_error = age / 1000 < c->error_sec;
+
+    } else {
+        if (c->valid_sec >= now) {
+            return NGX_OK;
+        }
         c->stale_updating = c->valid_sec + c->updating_sec >= now;
         c->stale_error = c->valid_sec + c->error_sec >= now;
-
-        ngx_shmtx_lock(&cache->shpool->mutex);
-
-        if (c->node->updating) {
-            rc = NGX_HTTP_CACHE_UPDATING;
-
-        } else {
-            c->node->updating = 1;
-            c->updating = 1;
-            c->lock_time = c->node->lock_time;
-            rc = NGX_HTTP_CACHE_STALE;
-        }
-
-        ngx_shmtx_unlock(&cache->shpool->mutex);
-
-        ngx_log_debug3(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                       "http file cache expired: %i %T %T",
-                       rc, c->valid_sec, now);
-
-        return rc;
     }
 
-    return NGX_OK;
+    ngx_shmtx_lock(&cache->shpool->mutex);
+
+    if (c->node->updating) {
+        rc = NGX_HTTP_CACHE_UPDATING;
+
+    } else {
+        c->node->updating = 1;
+        c->updating = 1;
+        c->lock_time = c->node->lock_time;
+        rc = NGX_HTTP_CACHE_STALE;
+    }
+
+    ngx_shmtx_unlock(&cache->shpool->mutex);
+
+    ngx_log_debug3(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "http file cache expired: %i %T %T",
+                   rc, c->valid_sec, now);
+
+    return rc;
 }
 
 
@@ -1330,6 +1353,12 @@ ngx_http_file_cache_set_header(ngx_http_request_t *r, u_char *buf)
     h->error_sec = c->error_sec;
     h->last_modified = c->last_modified;
     h->date = c->date;
+    if (c->fine_deadline) {
+        h->version = NGX_HTTP_CACHE_FINE_VERSION;
+        h->date = c->fine_birth;
+        h->valid_sec = c->fine_deadline;
+        h->updating_sec = c->fine_window;
+    }
     h->crc32 = c->crc32;
     h->valid_msec = (u_short) c->valid_msec;
     h->header_start = (u_short) c->header_start;

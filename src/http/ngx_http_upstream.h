@@ -225,6 +225,7 @@ typedef struct {
     ngx_msec_t                       cache_lock_timeout;
     ngx_msec_t                       cache_lock_age;
 
+    ngx_uint_t                       cache_fine_time;
     ngx_flag_t                       cache_revalidate;
     ngx_flag_t                       cache_convert_head;
     ngx_flag_t                       cache_background_update;
@@ -315,6 +316,7 @@ typedef struct {
     unsigned                         connection_close:1;
     unsigned                         chunked:1;
     unsigned                         no_cache:1;
+    unsigned                         cache_restricted:1;
     unsigned                         expired:1;
 } ngx_http_upstream_headers_in_t;
 
