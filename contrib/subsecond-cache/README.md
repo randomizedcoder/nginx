@@ -43,9 +43,8 @@ From the nginx repository root, using the build shell for the working tree:
 nix develop ./contrib/subsecond-cache#build -c sh -c '
   auto/configure && make -j"$(nproc)" &&
   sh contrib/subsecond-cache/tests/native.sh &&
-  TEST_NGINX_BINARY=$PWD/objs/nginx prove -I "$NGINX_TESTS/lib" \
-    contrib/subsecond-cache/tests/proxy_cache_fine.t \
-    contrib/subsecond-cache/tests/proxy_cache_fine_companions.t'
+  export TEST_NGINX_BINARY=$PWD/objs/nginx &&
+  cd "$NGINX_TESTS" && prove proxy_cache*.t'
 ```
 
 ### Build and test on Apple Silicon
@@ -56,11 +55,10 @@ Run these from this directory in the Git checkout:
 nix build
 nix run .#demo
 nix run .#bench -- --output "$PWD/results"
-nix develop -c prove -v tests/proxy_cache_fine.t tests/proxy_cache_fine_companions.t tests/cache_upgrade.t
-nix develop -c sh -c 'cd "$NGINX_TESTS" && prove -Ilib proxy_cache*.t'
+nix develop -c sh -c 'cd "$NGINX_TESTS" && prove proxy_cache*.t'
 ```
 
-The pinned Test::Nginx suite supplies the harness. Its integration tests start local nginx processes. For the native comparison and header tests, run these commands at the nginx repository root on Darwin with the system compiler:
+The integration tests are `proxy_cache_fine*.t` on the `http-cache-millisecond-freshness` branch of [randomizedcoder/nginx-tests](https://github.com/randomizedcoder/nginx-tests/tree/http-cache-millisecond-freshness), a fork of the nginx test suite. The flake pins that branch. The tests start local nginx processes and are skipped on a binary without the new directives. The upgrade test needs `TEST_NGINX_BASELINE`, which the default shell sets. For the native comparison and header tests, run these commands at the nginx repository root on Darwin with the system compiler:
 
 ```sh
 auto/configure --without-http_rewrite_module --without-http_gzip_module

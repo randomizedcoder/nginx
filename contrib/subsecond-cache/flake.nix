@@ -28,8 +28,10 @@
         rev = revision;
       });
       harness = builtins.fetchGit {
-        url = "https://github.com/nginx/nginx-tests.git";
-        rev = "4d1de3f357afeb91865d024b27516d6b67aad86e";
+        # Fork of nginx/nginx-tests carrying the proxy_cache_fine*.t tests.
+        url = "https://github.com/randomizedcoder/nginx-tests.git";
+        ref = "http-cache-millisecond-freshness";
+        rev = "7caad04b77fe14d3007700e568110baa42a7840c";
       };
       experiment = name: pkgs.writeShellApplication {
         inherit name;
