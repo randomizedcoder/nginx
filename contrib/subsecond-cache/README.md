@@ -100,11 +100,11 @@ Three runs on x86_64 Linux, ten seconds, four connections per path. Staleness is
 
 Reading the result:
 
-- **The fine lifetime holds across five caches.** Each cache deducts the age it received, so the lifetimes do not add up.
+- **Fine age is carried across five caches.** Each cache deducts the age it received, so five caches did not multiply the lifetime. This is not a strict bound on delivery age.
 - **The lifetime has to exceed the round trip to the origin.** With `--wan`, a 100 ms response is already stale when it reaches Melbourne. Nothing is reused there and every request crosses the Pacific: 164 responses in ten seconds.
 - **At 500 ms the path works.** Melbourne reuses each response for about 266 ms. Requests that arrive during the 234 ms refresh wait for it, which is why the fine path served fewer responses. A stale-while-revalidate window would cover that gap. This run does not use one.
 - **nginx keeps a `max-age=1` entry for one to two seconds**, because it stores whole-second deadlines.
-- **The whole-second lifetimes do not add up here either.** All five caches share one clock and expire at the same second boundary, so they refresh together. Caches with independent clocks and demand would not. This simulation does not show that case.
+- **The whole-second path here is nginx's behaviour, not RFC 9111's.** Stock nginx neither reads nor sends Age, so each cache applies the full `max-age` from the moment it stores a response. In this run all five caches share one clock and expire at the same second boundary, so their lifetimes did not add up. The runs change the lifetime and the age accounting together and do not isolate either.
 - **The cost is origin requests.** One fetch per lifetime would be 10 a second at 100 ms. The rest are concurrent misses, because the caches run without `proxy_cache_lock`.
 - **`proxy_cache_lock` is off on purpose.** A request waiting on the lock checks again only every 500 ms.
 - This is one host with constant load. It measures cache behaviour, not players.
@@ -121,6 +121,8 @@ Options, after `--`:
 | `--seconds` | 10 | Measured duration, after a two-second warm-up |
 | `--connections` | 4 | wrk connections per path |
 | `--fine-ms` | 100 | `max-age-ms` on the fine path |
+| `--path` | the two paths above | `NAME=POLICY`, repeatable. Replaces the default paths, for example `--path "paired=max-age=1, max-age-ms=1000"` |
+| `--modes` | `origin`, then `trusted` | `proxy_cache_fine_time` of each cache, origin side first, comma separated. For misconfiguration runs, for example `origin,trusted,off,trusted,trusted` |
 | `--output` | temporary directory | Keeps configurations, access logs, wrk reports and `summary.json` |
 
 Linux answers on every `127.0.0.0/8` address. On macOS add each address first, for example `sudo ifconfig lo0 alias 127.0.0.10`.
@@ -138,6 +140,7 @@ The top-level comparison.csv gives the median of the per-run metrics for each sc
 ### Implementation limits for reviewers
 
 - This prototype implements integer milliseconds in ordinary Cache-Control on builds with 64-bit time_t. Existing v5 disk entries retain their layout. Only entries with fine policy use v6. Version 6 uses the existing date, expiry, update-window and error-window slots in milliseconds. Older binaries reject those entries and refill them.
-- The cache measures upstream request delay using nginx's elapsed timer. Its stored deadlines and residence estimates use nginx's cached wall clock. Wall-clock steps and timer_resolution affect precision.
+- The cache measures upstream request delay using nginx's elapsed timer. Its stored deadlines and residence estimates use nginx's cached wall clock, so timer_resolution affects precision.
+- Each fine entry records the difference between the wall clock and the monotonic clock when stored. If that difference later moves by more than 10 ms, the wall clock stepped or the host was suspended, and the entry is fetched again instead of being reused or served stale. A fine entry is also fetched again after a restart. Not detected: a step of 10 ms or less, and a restored snapshot that rolls both clocks back together.
 - On conditional validation of a fine entry the cache retires its existing disk header, merges the validation response's caching metadata, and serves the validated body. The next request refills the entry. This avoids reviving the old policy at the cost of an extra full fetch. The benchmark uses full manifest refreshes; the Perl integration test exercises the 304 path separately.
 - This is a reference implementation for the HTTP WG discussion. The benchmark provides measured outcomes only after a run on the host.

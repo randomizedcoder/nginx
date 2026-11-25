@@ -26,6 +26,27 @@
 ngx_int_t ngx_http_cache_fine_headers(ngx_http_request_t *r);
 ngx_uint_t ngx_http_cache_fine_refused(ngx_http_request_t *r, int64_t now);
 int64_t ngx_http_cache_now_ms(void);
+int64_t ngx_http_cache_fine_offset(void);
+
+/*
+ * The wall clock less the monotonic clock is constant unless the wall clock
+ * steps or the host is suspended. A fine entry is reusable only while that
+ * offset is within this many milliseconds of its value when stored.
+ */
+#define NGX_HTTP_CACHE_FINE_STEP     10
+#define NGX_HTTP_CACHE_FINE_NONE     INT64_MIN
+
+static ngx_inline ngx_uint_t
+ngx_http_cache_fine_continuous(int64_t stored, int64_t current)
+{
+    if (stored == NGX_HTTP_CACHE_FINE_NONE) {
+        return 0;
+    }
+
+    return stored > current ? stored - current <= NGX_HTTP_CACHE_FINE_STEP
+                            : current - stored <= NGX_HTTP_CACHE_FINE_STEP;
+}
+
 
 static ngx_inline ngx_int_t
 ngx_http_cache_fine_status(int64_t now, int64_t deadline, int64_t window)
@@ -92,6 +113,7 @@ typedef struct {
     size_t                           body_start;
     off_t                            fs_size;
     ngx_msec_t                       lock_time;
+    int64_t                          fine_offset;
 } ngx_http_file_cache_node_t;
 
 
@@ -113,6 +135,7 @@ struct ngx_http_cache_s {
     int64_t                          fine_deadline;
     int64_t                          fine_window;
     int64_t                          fine_error;
+    int64_t                          fine_offset;
 
     ngx_str_t                        etag;
     ngx_str_t                        vary;

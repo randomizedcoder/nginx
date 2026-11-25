@@ -45,7 +45,34 @@ main(void)
         { "clock stepped back", -5, 2005, 0, -1, 1 }
     };
 
+    struct {
+        const char  *description;
+        int64_t      stored, current;
+        ngx_uint_t   expected;
+    } clock[] = {
+        { "unchanged offset", 5000, 5000, 1 },
+        { "jitter forwards within the limit", 5000, 5010, 1 },
+        { "jitter backwards within the limit", 5000, 4990, 1 },
+        { "step forwards past the limit", 5000, 5011, 0 },
+        { "step backwards past the limit", 5000, 4989, 0 },
+        { "one second back", 5000, 4000, 0 },
+        { "suspend for a minute", 5000, 65000, 0 },
+        { "no offset recorded, after a restart", NGX_HTTP_CACHE_FINE_NONE,
+          5000, 0 },
+        { "zero offset without a monotonic clock", 0, 0, 1 },
+        { "negative offsets", -5000, -5004, 1 }
+    };
+
     failed = 0;
+
+    for (i = 0; i < sizeof(clock) / sizeof(clock[0]); i++) {
+        if (ngx_http_cache_fine_continuous(clock[i].stored, clock[i].current)
+            != clock[i].expected)
+        {
+            fprintf(stderr, "clock: %s failed\n", clock[i].description);
+            failed++;
+        }
+    }
 
     for (i = 0; i < sizeof(status) / sizeof(status[0]); i++) {
         if (ngx_http_cache_fine_status(status[i].now, status[i].deadline,

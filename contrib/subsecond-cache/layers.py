@@ -204,6 +204,13 @@ def main():
                    help="wrk connections per path")
     p.add_argument("--fine-ms", type=int, default=100,
                    help="max-age-ms on the fine path")
+    p.add_argument("--path", action="append", metavar="NAME=POLICY",
+                   help="replace the default paths; repeat for each path, "
+                        "for example --path \"paired=max-age=1, "
+                        "max-age-ms=1000\"")
+    p.add_argument("--modes",
+                   help="proxy_cache_fine_time of each cache, origin side "
+                        "first, comma separated; for misconfiguration runs")
     p.add_argument("--output", type=Path)
     args = p.parse_args()
     if min(args.layers, args.seconds, args.connections, args.fine_ms) < 1:
@@ -215,6 +222,19 @@ def main():
     base = ipaddress.ip_address(args.base)
     hosts = [str(base + i) for i in range(args.layers + 1)]
     paths = policies(args.fine_ms)
+    if args.path:
+        paths = dict(item.split("=", 1) for item in args.path if "=" in item)
+        if len(paths) != len(args.path) or not all(
+                re.fullmatch(r"[a-z0-9-]+", name) and "\"" not in policy
+                for name, policy in paths.items()):
+            p.error("--path takes NAME=POLICY with a distinct lower-case name")
+    # Only the first cache hears the origin directly.
+    modes = ["origin"] + ["trusted"] * (args.layers - 1)
+    if args.modes:
+        modes = args.modes.split(",")
+        if len(modes) != args.layers or not all(
+                mode in ("off", "origin", "trusted") for mode in modes):
+            p.error("--modes needs off, origin or trusted for each cache")
     binary = str(Path(args.nginx).resolve())
 
     named = args.layers == len(SITES)
@@ -243,7 +263,8 @@ def main():
 
     print(f"{hosts[0]}  origin{', New York' if named else ''}")
     for i, host in enumerate(hosts[1:]):
-        print(f"{host}  {names[i]:<12} +{delays[i]:g} ms each way")
+        print(f"{host}  {names[i]:<12} {modes[i]:<8} "
+              f"+{delays[i]:g} ms each way")
     print(f"results  {root}\n", flush=True)
 
     with contextlib.ExitStack() as stack:
@@ -251,11 +272,10 @@ def main():
             root / "origin", binary, hosts[0], args.port,
             origin_conf(f"{hosts[0]}:{args.port}", paths)))
         for i, host in enumerate(hosts[1:], 1):
-            # Only the first cache hears the origin directly.
-            mode = "origin" if i == 1 else "trusted"
             stack.enter_context(server(
                 root / f"cache{i}", binary, host, args.port,
-                cache_conf(f"{host}:{args.port}", upstreams[i - 1], mode)))
+                cache_conf(f"{host}:{args.port}", upstreams[i - 1],
+                           modes[i - 1])))
 
         begin = time.time() + WARMUP
         end = begin + args.seconds
@@ -283,6 +303,7 @@ def main():
     (root / "summary.json").write_text(json.dumps(
         {"layers": args.layers, "seconds": args.seconds,
          "connections": args.connections, "delays_ms": delays,
+         "modes": modes,
          "results": results}, indent=2))
     print(f"Staleness in ms of responses leaving {names[-1]}, {args.seconds} s, "
           f"{args.connections} connections per path, "

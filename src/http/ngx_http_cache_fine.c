@@ -39,6 +39,13 @@ ngx_http_cache_now_ms(void)
 }
 
 
+int64_t
+ngx_http_cache_fine_offset(void)
+{
+    return ngx_http_cache_now_ms() - (int64_t) ngx_current_msec;
+}
+
+
 static ngx_uint_t
 ngx_http_fine_name(u_char *p, size_t len, const char *name, size_t n)
 {
@@ -445,6 +452,7 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
 
         age += u->state->header_time;
         c->fine_birth = now - age;
+        c->fine_offset = ngx_http_cache_fine_offset();
         c->fine_deadline = c->fine_birth + lifetime;
         if (c->fine_deadline <= 0) {
             c->fine_deadline = 0;

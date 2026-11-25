@@ -675,8 +675,15 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
 
         msec = ngx_http_cache_now_ms();
         rc = ngx_http_cache_fine_status(msec, c->fine_deadline, c->fine_window);
-        refused = r->upstream->conf->cache_fine_request
-                  && ngx_http_cache_fine_refused(r, msec);
+
+        /*
+         * After a restart, a clock step or a suspend the elapsed time is
+         * uncertain, so the entry is neither fresh nor served stale.
+         */
+        refused = !ngx_http_cache_fine_continuous(c->node->fine_offset,
+                                              ngx_http_cache_fine_offset())
+                  || (r->upstream->conf->cache_fine_request
+                      && ngx_http_cache_fine_refused(r, msec));
         if (rc == NGX_HTTP_CACHE_HIT && !refused) {
             return NGX_OK;
         }
@@ -1005,6 +1012,7 @@ renew:
     fcn->error = 0;
     fcn->exists = 0;
     fcn->valid_sec = 0;
+    fcn->fine_offset = NGX_HTTP_CACHE_FINE_NONE;
     fcn->uniq = 0;
     fcn->body_start = 0;
     fcn->fs_size = 0;
@@ -1519,6 +1527,8 @@ ngx_http_file_cache_update(ngx_http_request_t *r, ngx_temp_file_t *tf)
     c->node->error = 0;
     c->node->uniq = uniq;
     c->node->body_start = c->body_start;
+    c->node->fine_offset = c->fine_deadline ? c->fine_offset
+                                            : NGX_HTTP_CACHE_FINE_NONE;
 
     cache->sh->size += fs_size - c->node->fs_size;
     c->node->fs_size = fs_size;
@@ -2365,6 +2375,7 @@ ngx_http_file_cache_add(ngx_http_file_cache_t *cache, ngx_http_cache_t *c)
         fcn->uses = 1;
         fcn->exists = 1;
         fcn->fs_size = c->fs_size;
+        fcn->fine_offset = NGX_HTTP_CACHE_FINE_NONE;
 
         cache->sh->size += c->fs_size;
 
