@@ -4,7 +4,9 @@
 
   outputs = { self, nixpkgs }:
     let
-      system = "aarch64-darwin";
+      systems = [ "aarch64-darwin" "x86_64-linux" "aarch64-linux" ];
+      each = f: nixpkgs.lib.genAttrs systems (system: f system (perSystem system));
+      perSystem = system: let
       pkgs = nixpkgs.legacyPackages.${system};
       revision = "2e8440bcdc438f0f1cd03da778a3843ddb3c86d9";
       build = name: src: pkgs.stdenv.mkDerivation {
@@ -38,15 +40,24 @@
         '';
       };
       app = name: { type = "app"; program = "${experiment name}/bin/${name}"; };
+      in { inherit pkgs patched baseline harness app; };
     in {
-      packages.${system} = { default = patched; inherit baseline; };
-      apps.${system} = { demo = app "demo"; bench = app "bench"; };
-      devShells.${system}.default = pkgs.mkShell {
-        packages = with pkgs; [ python3 ffmpeg-headless wrk perl pcre2 zlib ];
-        TEST_NGINX_BINARY = "${patched}/sbin/nginx";
-        TEST_NGINX_BASELINE = "${baseline}/sbin/nginx";
-        NGINX_TESTS = harness;
-        PERL5LIB = "${harness}/lib";
-      };
+      packages = each (system: p: { default = p.patched; inherit (p) baseline; });
+      apps = each (system: p: { demo = p.app "demo"; bench = p.app "bench"; });
+      devShells = each (system: p: {
+        default = p.pkgs.mkShell {
+          packages = with p.pkgs; [ python3 ffmpeg-headless wrk perl pcre2 zlib ];
+          TEST_NGINX_BINARY = "${p.patched}/sbin/nginx";
+          TEST_NGINX_BASELINE = "${p.baseline}/sbin/nginx";
+          NGINX_TESTS = p.harness;
+          PERL5LIB = "${p.harness}/lib";
+        };
+        # Compiler and libraries only, for building the working tree.
+        build = p.pkgs.mkShell {
+          packages = with p.pkgs; [ perl pcre2 zlib ];
+          NGINX_TESTS = p.harness;
+          PERL5LIB = "${p.harness}/lib";
+        };
+      });
     };
 }

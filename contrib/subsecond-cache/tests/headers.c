@@ -91,9 +91,10 @@ main(int argc, char **argv)
     if (ngx_http_cache_fine_headers(&r) != NGX_OK) {
         return 1;
     }
-    printf("%lld %lld", (long long) (cache.fine_deadline
+    printf("%lld %lld %lld", (long long) (cache.fine_deadline
                             ? cache.fine_deadline - 100000 : 0),
-                            (long long) cache.fine_window);
+                            (long long) cache.fine_window,
+                            (long long) cache.fine_error);
     for (part = &u.headers_in.headers.part; part; part = part->next) {
         h = part->elts;
         for (i = 0; i < part->nelts; i++) {

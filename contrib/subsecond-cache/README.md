@@ -11,6 +11,43 @@ Set `proxy_cache_fine_time origin;` at the cache connected directly to the origi
 
 The default is `off`. To use the legacy policy at a boundary that might replay stale fine age, configure `proxy_cache_fine_time off;` and `proxy_hide_header Age-Ms;`. A trusted receiver falls back on a missing, invalid or inconsistent age pair. Presence of a plausible pair cannot identify an old cache on the path.
 
+### Other companions
+
+| Companion | Prototype behaviour |
+|---|---|
+| `stale-if-error-ms` (response) | Paired with `stale-if-error`. Sets the error window in milliseconds. A valid pair alone makes the entry fine. |
+| `max-age-ms`, `min-fresh-ms` (request) | Applied to entries with fine age when `proxy_cache_fine_request on;` is set. A refused entry is fetched again and is not served stale. |
+| Cache-Status `ttl-ms` | `$upstream_cache_ttl` and `$upstream_cache_ttl_ms` give the remaining freshness of an entry with fine age. Both are empty for whole-second entries and negative once stale. |
+| `max-stale-ms`, request `stale-if-error-ms` | Not implemented. |
+| `Retry-After-Ms`, Prefer `wait-ms` | Passed through. nginx neither generates nor consumes these. |
+
+`proxy_cache_fine_request` defaults to `off`, because stock nginx ignores request Cache-Control and a client could otherwise force origin fetches. A missing or invalid base directive leaves the request unconstrained. An invalid companion yields to its base.
+
+nginx honours stale-if-error only for failures that reach `ngx_http_upstream_next`, such as connection errors and timeouts. That is unchanged.
+
+A Cache-Status field can be composed from the variables:
+
+```nginx
+map $upstream_cache_ttl_ms $fine_ttl {
+    ""      "";
+    default "; ttl=$upstream_cache_ttl; ttl-ms=$upstream_cache_ttl_ms";
+}
+add_header Cache-Status "edge$fine_ttl";
+```
+
+### Build and test on Linux
+
+From the nginx repository root, using the build shell for the working tree:
+
+```sh
+nix develop ./contrib/subsecond-cache#build -c sh -c '
+  auto/configure && make -j"$(nproc)" &&
+  sh contrib/subsecond-cache/tests/native.sh &&
+  TEST_NGINX_BINARY=$PWD/objs/nginx prove -I "$NGINX_TESTS/lib" \
+    contrib/subsecond-cache/tests/proxy_cache_fine.t \
+    contrib/subsecond-cache/tests/proxy_cache_fine_companions.t'
+```
+
 ### Build and test on Apple Silicon
 
 Run these from this directory in the Git checkout:
@@ -19,7 +56,7 @@ Run these from this directory in the Git checkout:
 nix build
 nix run .#demo
 nix run .#bench -- --output "$PWD/results"
-nix develop -c prove -v tests/proxy_cache_fine.t tests/cache_upgrade.t
+nix develop -c prove -v tests/proxy_cache_fine.t tests/proxy_cache_fine_companions.t tests/cache_upgrade.t
 nix develop -c sh -c 'cd "$NGINX_TESTS" && prove -Ilib proxy_cache*.t'
 ```
 
@@ -45,7 +82,7 @@ The top-level comparison.csv gives the median of the per-run metrics for each sc
 
 ### Implementation limits for reviewers
 
-- This prototype implements integer milliseconds in ordinary Cache-Control on builds with 64-bit time_t. Existing v5 disk entries retain their layout. Only entries with fine policy use v6. Version 6 uses the existing date, expiry and update-window slots in milliseconds. Older binaries reject those entries and refill them.
+- This prototype implements integer milliseconds in ordinary Cache-Control on builds with 64-bit time_t. Existing v5 disk entries retain their layout. Only entries with fine policy use v6. Version 6 uses the existing date, expiry, update-window and error-window slots in milliseconds. Older binaries reject those entries and refill them.
 - The cache measures upstream request delay using nginx's elapsed timer. Its stored deadlines and residence estimates use nginx's cached wall clock. Wall-clock steps and timer_resolution affect precision.
 - On conditional validation of a fine entry the cache retires its existing disk header, merges the validation response's caching metadata, and serves the validated body. The next request refills the entry. This avoids reviving the old policy at the cost of an extra full fetch. The benchmark uses full manifest refreshes; the Perl integration test exercises the 304 path separately.
 - This is a reference implementation for the HTTP WG discussion. The benchmark provides measured outcomes only after a run on the host.

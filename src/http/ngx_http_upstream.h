@@ -226,6 +226,7 @@ typedef struct {
     ngx_msec_t                       cache_lock_age;
 
     ngx_uint_t                       cache_fine_time;
+    ngx_flag_t                       cache_fine_request;
     ngx_flag_t                       cache_revalidate;
     ngx_flag_t                       cache_convert_head;
     ngx_flag_t                       cache_background_update;

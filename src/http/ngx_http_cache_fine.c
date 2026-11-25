@@ -10,15 +10,22 @@
 
 enum {
     MAX_AGE, MAX_AGE_MS, SHARED, SHARED_MS, UPDATE, UPDATE_MS, ERROR_AGE,
-    RESTRICTED, MUST_VALIDATE, NVALUES
+    ERROR_MS, RESTRICTED, MUST_VALIDATE, NVALUES
 };
 
 static ngx_str_t  directives[] = {
     ngx_string("max-age"), ngx_string("max-age-ms"),
     ngx_string("s-maxage"), ngx_string("s-maxage-ms"),
     ngx_string("stale-while-revalidate"), ngx_string("stale-while-revalidate-ms"),
-    ngx_string("stale-if-error"), ngx_string("no-cache"),
-    ngx_string("must-revalidate")
+    ngx_string("stale-if-error"), ngx_string("stale-if-error-ms"),
+    ngx_string("no-cache"), ngx_string("must-revalidate")
+};
+
+enum { REQ_MAX_AGE, REQ_MAX_AGE_MS, REQ_MIN_FRESH, REQ_MIN_FRESH_MS, REQ_NVALUES };
+
+static ngx_str_t  request_directives[] = {
+    ngx_string("max-age"), ngx_string("max-age-ms"),
+    ngx_string("min-fresh"), ngx_string("min-fresh-ms")
 };
 
 
@@ -39,12 +46,94 @@ ngx_http_fine_name(u_char *p, size_t len, const char *name, size_t n)
 }
 
 
+/*
+ * Take the next directive from a field line. DONE reports the end of the
+ * line and DECLINED an unterminated quoted string.
+ */
+static ngx_int_t
+ngx_http_fine_token(u_char **pos, u_char *end, ngx_str_t *name, ngx_str_t *arg)
+{
+    u_char      *p, *start, *last, *eq;
+    ngx_uint_t   quoted;
+
+    p = *pos;
+    while (p < end && (*p == ' ' || *p == '\t' || *p == ',')) {
+        p++;
+    }
+
+    if (p == end) {
+        return NGX_DONE;
+    }
+
+    start = p;
+    quoted = 0;
+    while (p < end && (quoted || *p != ',')) {
+        if (quoted && *p == '\\' && end - p > 1) {
+            p += 2;
+            continue;
+        }
+        if (*p == '"') {
+            quoted = !quoted;
+        }
+        p++;
+    }
+
+    if (quoted) {
+        return NGX_DECLINED;
+    }
+
+    *pos = p;
+
+    last = p;
+    while (last > start && (last[-1] == ' ' || last[-1] == '\t')) {
+        last--;
+    }
+
+    eq = ngx_strlchr(start, last, '=');
+    name->data = start;
+    name->len = (eq ? eq : last) - start;
+    arg->data = eq ? eq + 1 : NULL;
+    arg->len = eq ? last - eq - 1 : 0;
+
+    return NGX_OK;
+}
+
+
 /* Keep missing (DECLINED) distinct from invalid or repeated (ERROR). */
+static ngx_uint_t
+ngx_http_fine_value(ngx_str_t *names, ngx_uint_t n, ngx_str_t *name,
+    ngx_str_t *arg, int64_t *v)
+{
+    ngx_uint_t  i;
+
+    for (i = 0; i < n; i++) {
+        if (names[i].len != name->len
+            || ngx_strncasecmp(name->data, names[i].data, name->len))
+        {
+            continue;
+        }
+
+        if (v[i] != NGX_DECLINED || arg->data == NULL || arg->len > 15) {
+            v[i] = NGX_ERROR;
+
+        } else {
+            v[i] = ngx_atoof(arg->data, arg->len);
+        }
+
+        return 1;
+    }
+
+    return 0;
+}
+
+
 static ngx_int_t
 ngx_http_fine_policy(ngx_table_elt_t *h, int64_t *v)
 {
-    u_char      *p, *end, *start, *last, *eq, *key;
-    ngx_uint_t   i, quoted;
+    u_char      *p, *end;
+    ngx_int_t    rc;
+    ngx_str_t    name, arg;
+    ngx_uint_t   i;
 
     for (i = 0; i < NVALUES; i++) {
         v[i] = NGX_DECLINED;
@@ -54,74 +143,95 @@ ngx_http_fine_policy(ngx_table_elt_t *h, int64_t *v)
         p = h->value.data;
         end = p + h->value.len;
 
-        while (p < end) {
-            while (p < end && (*p == ' ' || *p == '\t' || *p == ',')) {
-                p++;
+        for ( ;; ) {
+            rc = ngx_http_fine_token(&p, end, &name, &arg);
+            if (rc == NGX_DONE) {
+                break;
             }
 
-            start = p;
-            quoted = 0;
-            while (p < end && (quoted || *p != ',')) {
-                if (quoted && *p == '\\' && end - p > 1) {
-                    p += 2;
-                    continue;
-                }
-                if (*p == '"') {
-                    quoted = !quoted;
-                }
-                p++;
-            }
-
-            if (quoted) {
-                return NGX_DECLINED;
-            }
-
-            last = p;
-            while (last > start && (last[-1] == ' ' || last[-1] == '\t')) {
-                last--;
-            }
-
-            eq = ngx_strlchr(start, last, '=');
-            key = eq ? eq : last;
-
-            if (ngx_http_fine_name(start, key - start, "private", 7)
-                || ngx_http_fine_name(start, key - start, "no-store", 8))
+            if (rc != NGX_OK
+                || ngx_http_fine_name(name.data, name.len, "private", 7)
+                || ngx_http_fine_name(name.data, name.len, "no-store", 8)
+                || ngx_http_fine_name(name.data, name.len, "no-cache", 8))
             {
                 return NGX_DECLINED;
             }
 
-            if (ngx_http_fine_name(start, key - start, "proxy-revalidate", 16)) {
+            if (ngx_http_fine_name(name.data, name.len, "proxy-revalidate", 16)
+                || ngx_http_fine_name(name.data, name.len,
+                                      "must-revalidate", 15))
+            {
                 v[MUST_VALIDATE] = 1;
+                continue;
             }
 
-            for (i = 0; i < NVALUES; i++) {
-                if (directives[i].len != (size_t) (key - start)
-                    || ngx_strncasecmp(start, directives[i].data, key - start))
-                {
-                    continue;
-                }
-
-                if (i == RESTRICTED) {
-                    return NGX_DECLINED;
-                }
-
-                if (i == MUST_VALIDATE) {
-                    v[i] = 1;
-
-                } else if (v[i] != NGX_DECLINED || eq == NULL
-                           || last - eq - 1 > 15)
-                {
-                    v[i] = NGX_ERROR;
-
-                } else {
-                    v[i] = ngx_atoof(eq + 1, last - eq - 1);
-                }
-                break;
-            }
+            (void) ngx_http_fine_value(directives, RESTRICTED, &name, &arg, v);
         }
     }
 
     return NGX_OK;
+}
+
+
+/*
+ * Report whether the request's max-age and min-fresh directives, with
+ * their millisecond companions, refuse a stored response with fine age.
+ */
+ngx_uint_t
+ngx_http_cache_fine_refused(ngx_http_request_t *r, int64_t now)
+{
+    u_char            *p, *end;
+    int64_t            v[REQ_NVALUES], limit[2];
+    ngx_int_t          rc;
+    ngx_str_t          name, arg;
+    ngx_uint_t         i;
+    ngx_list_part_t   *part;
+    ngx_table_elt_t   *h;
+    ngx_http_cache_t  *c;
+
+    c = r->cache;
+
+    for (i = 0; i < REQ_NVALUES; i++) {
+        v[i] = NGX_DECLINED;
+    }
+
+    for (part = &r->headers_in.headers.part; part; part = part->next) {
+        h = part->elts;
+        for (i = 0; i < part->nelts; i++) {
+            if (!ngx_http_fine_name(h[i].key.data, h[i].key.len,
+                                    "cache-control", 13))
+            {
+                continue;
+            }
+
+            p = h[i].value.data;
+            end = p + h[i].value.len;
+
+            for ( ;; ) {
+                rc = ngx_http_fine_token(&p, end, &name, &arg);
+                if (rc == NGX_DONE) {
+                    break;
+                }
+
+                if (rc != NGX_OK) {
+                    return 0;
+                }
+
+                (void) ngx_http_fine_value(request_directives, REQ_NVALUES,
+                                           &name, &arg, v);
+            }
+        }
+    }
+
+    /* A companion needs a valid base. An invalid companion yields to it. */
+    for (i = 0; i < 2; i++) {
+        limit[i] = v[2 * i] < 0 ? -1
+                   : v[2 * i + 1] >= 0 ? v[2 * i + 1] : v[2 * i] * 1000;
+    }
+
+    return !ngx_http_cache_fine_acceptable(now - c->fine_birth,
+                                           c->fine_deadline - now,
+                                           limit[0], limit[1]);
 }
 
 
@@ -245,6 +355,7 @@ ngx_int_t
 ngx_http_cache_fine_headers(ngx_http_request_t *r)
 {
     int64_t              now, seconds, age, lifetime, window, v[NVALUES];
+    ngx_uint_t           stale;
     ngx_uint_t           i, base;
     ngx_list_part_t     *part;
     ngx_table_elt_t     *h, *ordinary;
@@ -304,8 +415,13 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
         }
 
         base = v[SHARED] == NGX_DECLINED ? MAX_AGE : SHARED;
-        if (v[base] < 0 || (v[base + 1] < 0
-                             && (v[UPDATE] < 0 || v[UPDATE_MS] < 0)))
+        stale = base != SHARED && v[MUST_VALIDATE] < 0;
+
+        /* Fine time needs a valid lifetime and at least one valid pair. */
+        if (v[base] < 0
+            || (v[base + 1] < 0
+                && !(stale && v[UPDATE] >= 0 && v[UPDATE_MS] >= 0)
+                && !(stale && v[ERROR_AGE] >= 0 && v[ERROR_MS] >= 0)))
         {
             return NGX_OK;
         }
@@ -323,7 +439,7 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
 
         lifetime = v[base + 1] >= 0 ? v[base + 1] : v[base] * 1000;
         window = 0;
-        if (base != SHARED && v[MUST_VALIDATE] < 0 && v[UPDATE] >= 0) {
+        if (stale && v[UPDATE] >= 0) {
             window = v[UPDATE_MS] >= 0 ? v[UPDATE_MS] : v[UPDATE] * 1000;
         }
 
@@ -338,8 +454,12 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
 
         c->fine_window = window;
         c->valid_sec = ngx_max(1, c->fine_deadline / 1000);
-        c->error_sec = base != SHARED && v[MUST_VALIDATE] < 0
-                       && v[ERROR_AGE] >= 0 ? v[ERROR_AGE] : 0;
+        c->fine_error = 0;
+        if (stale && v[ERROR_AGE] >= 0) {
+            c->fine_error = v[ERROR_MS] >= 0 ? v[ERROR_MS]
+                                             : v[ERROR_AGE] * 1000;
+        }
+        c->error_sec = c->fine_error / 1000;
         u->headers_in.no_cache = 0;
         u->headers_in.expired = 0;
     }

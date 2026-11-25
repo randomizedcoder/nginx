@@ -24,6 +24,7 @@
 #define NGX_HTTP_CACHE_SCARCE        8
 
 ngx_int_t ngx_http_cache_fine_headers(ngx_http_request_t *r);
+ngx_uint_t ngx_http_cache_fine_refused(ngx_http_request_t *r, int64_t now);
 int64_t ngx_http_cache_now_ms(void);
 
 static ngx_inline ngx_int_t
@@ -38,6 +39,16 @@ ngx_http_cache_fine_status(int64_t now, int64_t deadline, int64_t window)
     }
 
     return NGX_HTTP_CACHE_EXPIRED;
+}
+
+
+/* A negative limit means the request did not send that directive. */
+static ngx_inline ngx_uint_t
+ngx_http_cache_fine_acceptable(int64_t age, int64_t remaining,
+    int64_t max_age, int64_t min_fresh)
+{
+    return (max_age < 0 || age <= max_age)
+           && (min_fresh < 0 || remaining >= min_fresh);
 }
 
 
@@ -101,6 +112,7 @@ struct ngx_http_cache_s {
     int64_t                          fine_birth;
     int64_t                          fine_deadline;
     int64_t                          fine_window;
+    int64_t                          fine_error;
 
     ngx_str_t                        etag;
     ngx_str_t                        vary;

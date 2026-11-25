@@ -631,10 +631,12 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
     c->date = h->date;
     c->valid_msec = h->valid_msec;
     if (h->version == NGX_HTTP_CACHE_FINE_VERSION) {
-        /* Version 6 stores date, expiry and update window in milliseconds. */
+        /* Version 6 stores date, expiry and stale windows in milliseconds. */
         c->fine_birth = h->date;
         c->fine_deadline = h->valid_sec;
         c->fine_window = h->updating_sec;
+        c->fine_error = h->error_sec;
+        c->error_sec /= 1000;
         c->date /= 1000;
         c->valid_sec /= 1000;
         c->updating_sec /= 1000;
@@ -668,15 +670,18 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
     now = ngx_time();
 
     if (c->fine_deadline) {
-        int64_t  msec;
+        int64_t     msec;
+        ngx_uint_t  refused;
 
         msec = ngx_http_cache_now_ms();
         rc = ngx_http_cache_fine_status(msec, c->fine_deadline, c->fine_window);
-        if (rc == NGX_HTTP_CACHE_HIT) {
+        refused = r->upstream->conf->cache_fine_request
+                  && ngx_http_cache_fine_refused(r, msec);
+        if (rc == NGX_HTTP_CACHE_HIT && !refused) {
             return NGX_OK;
         }
-        c->stale_updating = (rc == NGX_HTTP_CACHE_UPDATING);
-        c->stale_error = (msec - c->fine_deadline) / 1000 < c->error_sec;
+        c->stale_updating = !refused && rc == NGX_HTTP_CACHE_UPDATING;
+        c->stale_error = !refused && msec - c->fine_deadline < c->fine_error;
 
     } else {
         if (c->valid_sec >= now) {
@@ -1359,6 +1364,7 @@ ngx_http_file_cache_set_header(ngx_http_request_t *r, u_char *buf)
         h->date = c->fine_birth;
         h->valid_sec = c->fine_deadline;
         h->updating_sec = c->fine_window;
+        h->error_sec = c->fine_error;
     }
     h->crc32 = c->crc32;
     h->valid_msec = (u_short) c->valid_msec;
