@@ -68,6 +68,63 @@ contrib/subsecond-cache/tests/native.sh
 
 These tests use fixed timestamps and the compiled production code. The Nix demo and integration-test builds include the rewrite module. Building with `--without-http-cache` also checks that non-cache builds compile.
 
+### Layered simulation
+
+`nix run .#layers` shows how quickly an origin update reaches a client through a chain of caches. It takes about 15 seconds. The chain follows a live stream from an origin in New York to viewers in Melbourne.
+
+| Address | Role | `--wan` delay each way |
+|---|---|---:|
+| `127.0.0.10` | Origin, New York | |
+| `127.0.0.11` | New York cache, `proxy_cache_fine_time origin;` | 1 ms |
+| `127.0.0.12` | Chicago cache, `trusted` | 10 ms |
+| `127.0.0.13` | Los Angeles cache, `trusted` | 25 ms |
+| `127.0.0.14` | Sydney cache, `trusted` | 75 ms |
+| `127.0.0.15` | Melbourne cache, `trusted` | 6 ms |
+
+- **Origin.** Returns its own clock in milliseconds as the body and in `X-Origin-Time`. Two paths differ only in Cache-Control: `/second` sends `max-age=1` and `/fine` sends `max-age=0, max-age-ms=100`.
+- **Caches.** Each proxies to the address before it.
+- **Client.** wrk pulls both paths through Melbourne at the same time.
+- **Measurement.** Melbourne logs its own time and the `X-Origin-Time` it sent. The difference is the staleness of that response.
+- **Delay.** Loopback has none. `--wan` puts a small TCP relay on each hop that holds traffic for the delay shown, 117 ms one way and 234 ms for the round trip. The figures are illustrative, not measured routes.
+
+Three runs on x86_64 Linux, ten seconds, four connections per path. Staleness is in milliseconds:
+
+| Run | Path | Responses | Mean | p50 | p99 | Max | Origin req/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Loopback | `/second` | 225988 | 999.2 | 996.0 | 1974.0 | 1999.0 | 1.8 |
+| Loopback | `/fine`, 100 ms | 219498 | 48.2 | 48.0 | 94.0 | 111.0 | 35.9 |
+| `--wan` | `/second` | 451257 | 1001.3 | 1008.0 | 1861.0 | 1880.0 | 2.0 |
+| `--wan` | `/fine`, 100 ms | 164 | 124.8 | 123.0 | 144.0 | 144.0 | 12.3 |
+| `--wan --fine-ms 500` | `/second` | 386656 | 1010.7 | 1016.0 | 1862.0 | 1881.0 | 2.0 |
+| `--wan --fine-ms 500` | `/fine`, 500 ms | 62713 | 207.9 | 210.0 | 276.0 | 470.0 | 6.4 |
+
+Reading the result:
+
+- **The fine lifetime holds across five caches.** Each cache deducts the age it received, so the lifetimes do not add up.
+- **The lifetime has to exceed the round trip to the origin.** With `--wan`, a 100 ms response is already stale when it reaches Melbourne. Nothing is reused there and every request crosses the Pacific: 164 responses in ten seconds.
+- **At 500 ms the path works.** Melbourne reuses each response for about 266 ms. Requests that arrive during the 234 ms refresh wait for it, which is why the fine path served fewer responses. A stale-while-revalidate window would cover that gap. This run does not use one.
+- **nginx keeps a `max-age=1` entry for one to two seconds**, because it stores whole-second deadlines.
+- **The whole-second lifetimes do not add up here either.** All five caches share one clock and expire at the same second boundary, so they refresh together. Caches with independent clocks and demand would not. This simulation does not show that case.
+- **The cost is origin requests.** One fetch per lifetime would be 10 a second at 100 ms. The rest are concurrent misses, because the caches run without `proxy_cache_lock`.
+- **`proxy_cache_lock` is off on purpose.** A request waiting on the lock checks again only every 500 ms.
+- This is one host with constant load. It measures cache behaviour, not players.
+
+Options, after `--`:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--layers` | 5 | Caches in the chain. Site names apply to five |
+| `--wan` | off | Add the delays in the table above |
+| `--delays` | none | One-way delay of each hop in ms, origin side first, comma separated |
+| `--base` | `127.0.0.10` | Origin address. Caches take the following addresses |
+| `--port` | 8080 | Port on every address. Relays use the next port |
+| `--seconds` | 10 | Measured duration, after a two-second warm-up |
+| `--connections` | 4 | wrk connections per path |
+| `--fine-ms` | 100 | `max-age-ms` on the fine path |
+| `--output` | temporary directory | Keeps configurations, access logs, wrk reports and `summary.json` |
+
+Linux answers on every `127.0.0.0/8` address. On macOS add each address first, for example `sudo ifconfig lo0 alias 127.0.0.10`.
+
 ### Read the experiment
 
 The demo runs four loopback nginx processes and several short scenarios. The full benchmark takes about an hour on an idle machine. Two origins share immutable media and an atomically published six-segment playlist. Each run selects a policy and routes players through the edge and shield to the corresponding origin. The publisher advances the sequence every second. The two mixed-version smoke runs use a stock shield, with fallback lifetimes of zero and one second.

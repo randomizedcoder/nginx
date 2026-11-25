@@ -42,10 +42,22 @@
         '';
       };
       app = name: { type = "app"; program = "${experiment name}/bin/${name}"; };
-      in { inherit pkgs patched baseline harness app; };
+      # One origin and a chain of caches on 127.0.0.10 and up, driven by wrk.
+      layers = pkgs.writeShellApplication {
+        name = "layers";
+        runtimeInputs = [ pkgs.python3 pkgs.wrk ];
+        text = ''
+          exec python3 ${./layers.py} --nginx ${patched}/sbin/nginx "$@"
+        '';
+      };
+      in { inherit pkgs patched baseline harness app layers; };
     in {
       packages = each (system: p: { default = p.patched; inherit (p) baseline; });
-      apps = each (system: p: { demo = p.app "demo"; bench = p.app "bench"; });
+      apps = each (system: p: {
+        demo = p.app "demo";
+        bench = p.app "bench";
+        layers = { type = "app"; program = "${p.layers}/bin/layers"; };
+      });
       devShells = each (system: p: {
         default = p.pkgs.mkShell {
           packages = with p.pkgs; [ python3 ffmpeg-headless wrk perl pcre2 zlib ];
