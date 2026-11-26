@@ -7,6 +7,7 @@ import json
 import math
 import random
 import re
+import shutil
 import socket
 import statistics
 import subprocess
@@ -117,17 +118,23 @@ def player(number, url, start, stop, paced, seed):
         return stall
 
     poll = 0
+    failed = 0
     while CLOCK() < stop:
         sent = CLOCK()
         poll += 1
         request_id = f"{number}-{poll}"
         request = urllib.request.Request(url + "/live.m3u8",
                                          headers={"X-Player-Poll": request_id})
-        with urllib.request.urlopen(request, timeout=5) as reply:
-            names = [n for n in reply.read().decode().splitlines()
-                     if n and not n.startswith("#")]
-            status = reply.headers.get("X-Edge", "")
-            age = reply.headers.get("Age-Ms", "")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as reply:
+                names = [n for n in reply.read().decode().splitlines()
+                         if n and not n.startswith("#")]
+                status = reply.headers.get("X-Edge", "")
+                age = reply.headers.get("Age-Ms", "")
+        except OSError:
+            # A reload that fails or times out is a result, so count it.
+            failed += 1
+            continue
         discovered = CLOCK()
         if last is None:
             last = int(names[-3][:-3]) - 1
@@ -157,7 +164,7 @@ def player(number, url, start, stop, paced, seed):
                            missed, status, age, request_id))
             last = seq
         wait_until(sent + (1.0 if fresh else 0.5))
-    return events
+    return events, failed
 
 
 def percentile(values, fraction):
@@ -165,6 +172,10 @@ def percentile(values, fraction):
 
 
 def run(args, media, out, policy, paced, loaded, rep, mixed=False):
+    if (out / "summary.json").exists():
+        # Keep completed runs so an interrupted benchmark can resume.
+        return
+    shutil.rmtree(out, ignore_errors=True)
     out.mkdir()
     root = out / "media"
     root.mkdir()
@@ -233,7 +244,9 @@ def run(args, media, out, policy, paced, loaded, rep, mixed=False):
             for i in range(args.seconds + args.warmup):
                 wait_until(start + i)
                 published[i + 6] = publish(root, media, i + 6)
-            events = [event for future in futures for event in future.result()]
+            results = [future.result() for future in futures]
+            events = [event for found, _ in results for event in found]
+            failed = sum(count for _, count in results)
         if loaded and load.wait(timeout=10):
             raise RuntimeError("wrk failed; see wrk.txt")
 
@@ -268,6 +281,7 @@ def run(args, media, out, policy, paced, loaded, rep, mixed=False):
                  undiscovered_player_segments=args.players * len(cohort) - len(before_end),
                  late_downloads=sum(e[6] > 0 for e in selected),
                  missed=sum(e[7] for e in selected),
+                 failed_playlist_requests=failed,
                  origin_playlist_gets_per_segment=origin_gets / args.seconds)
     if loaded:
         report = (out / "wrk.txt").read_text()
@@ -295,14 +309,15 @@ def compare(root):
         groups.setdefault(key, []).append(run_stats)
     metrics = ("discovery_p50_ms", "discovery_p95_ms", "completion_p95_ms",
                "buffer_p05_s", "stalled_player_seconds", "late_downloads",
-               "undiscovered_player_segments", "origin_playlist_gets_per_segment")
+               "undiscovered_player_segments", "failed_playlist_requests",
+               "origin_playlist_gets_per_segment")
     # Preserve paired per-run observations in the original summaries.
     with (root / "comparison.csv").open("w") as stream:
         writer = csv.writer(stream)
         writer.writerow(("policy", "paced", "load", "mixed", "repetitions", *metrics))
         for key, repetitions in sorted(groups.items()):
             writer.writerow((*key, len(repetitions),
-                             *(statistics.median(r[m] for r in repetitions)
+                             *(statistics.median(r.get(m, 0) for r in repetitions)
                                for m in metrics)))
     print(f"Comparison (median of per-run metrics): {root / 'comparison.csv'}")
 
@@ -326,8 +341,9 @@ def main():
     root.mkdir(exist_ok=True)
     print(f"Results: {root}", flush=True)
     media = root / "encoded"
-    media.mkdir()
-    encode(media, 6 + args.seconds + args.warmup)
+    if not media.exists():
+        media.mkdir()
+        encode(media, 6 + args.seconds + args.warmup)
     for rep in range(3 if bench else 1):
         for paced in ([False, True] if bench else [False]):
             for loaded in ([False, True] if bench else [False]):

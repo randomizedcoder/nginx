@@ -137,10 +137,23 @@ Each benchmark repetition uses the same player phases across policies. Compare z
 
 The top-level comparison.csv gives the median of the per-run metrics for each scenario. Keep the per-run summary, events.csv, access logs and wrk.txt. The summary's sample poll ID joins player discovery and download times to the request on each tier that processed it. An edge hit needs no shield request. Use monotonic timestamps for player elapsed times and nginx wall timestamps for tier logs. The output directory holds temporary segment files and cache data as well as measurements. Use a fresh output path for each invocation.
 
-### Implementation limits for reviewers
+### Implementation status for reviewers
 
-- This prototype implements integer milliseconds in ordinary Cache-Control on builds with 64-bit time_t. Existing v5 disk entries retain their layout. Only entries with fine policy use v6. Version 6 uses the existing date, expiry, update-window and error-window slots in milliseconds. Older binaries reject those entries and refill them.
-- The cache measures upstream request delay using nginx's elapsed timer. Its stored deadlines and residence estimates use nginx's cached wall clock, so timer_resolution affects precision.
-- Each fine entry records the difference between the wall clock and the monotonic clock when stored. If that difference later moves by more than 10 ms, the wall clock stepped or the host was suspended, and the entry is fetched again instead of being reused or served stale. A fine entry is also fetched again after a restart. Not detected: a step of 10 ms or less, and a restored snapshot that rolls both clocks back together.
-- On conditional validation of a fine entry the cache retires its existing disk header, merges the validation response's caching metadata, and serves the validated body. The next request refills the entry. This avoids reviving the old policy at the cost of an extra full fetch. The benchmark uses full manifest refreshes; the Perl integration test exercises the 304 path separately.
-- This is a reference implementation for the HTTP WG discussion. The benchmark provides measured outcomes only after a run on the host.
+The detailed [prototype conformance and evidence table](https://github.com/randomizedcoder/draft-seddon-httpbis-subsecond-freshness/blob/main/explainer.md#prototype-conformance)
+is maintained with the proposal. It separates the draft's requirements from
+implemented behavior and reported checks, including the elapsed-time,
+Age-Ms parameter, targeted-field and Expires-only gaps. Prototype source
+revision: `9198f9a28f58b8afc8c06817f51175b4fbeea786`.
+
+Fine entries use v6 cache files on 64-bit time_t builds. The binary reads v5;
+older binaries reject v6 and refill. A 304 merges metadata and serves the
+validated body, then the next request refills. These are implementation
+choices, not wire requirements. The benchmark uses full playlist refreshes,
+so its results do not establish the cost of repeated conditional validation.
+
+The HLS benchmark ran on 25 November on one busy Linux machine, with a local
+harness change to record failed reloads and resume completed runs. The
+[measurements](https://github.com/randomizedcoder/draft-seddon-httpbis-subsecond-freshness/blob/main/measurements.md#test-8-simulated-hls-players)
+record repetitions, results, local raw-artifact locations and missing build
+provenance. They are observations of this prototype, not a real-player or
+independent-cache result. No code tests were rerun in this document pass.
