@@ -1,0 +1,22 @@
+Pitfall 9: record and log nothing when fine age is not used.
+--- a/src/http/ngx_http_cache_fine.c
++++ b/src/http/ngx_http_cache_fine.c
+@@ -73,15 +73,9 @@
+         "elapsed time is uncertain"
+     };
+ 
+-    if (status == NGX_HTTP_CACHE_FINE_CLOCK) {
+-        r->cache->fine_clock = 1;
+-
+-    } else {
+-        r->cache->fine_status = status;
+-    }
+-
+-    ngx_log_error(NGX_LOG_INFO, r->pool->log, 0,
+-                  "fine cache time not used: %s", reasons[status]);
++    (void) r;
++    (void) reasons;
++    (void) status;
+ }
+ 
+ 

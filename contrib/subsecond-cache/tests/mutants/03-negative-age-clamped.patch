@@ -1,0 +1,30 @@
+Pitfall 3: clamp a negative age to zero, at output and at lookup.
+--- a/src/http/ngx_http_cache_fine.c
++++ b/src/http/ngx_http_cache_fine.c
+@@ -574,13 +574,7 @@
+         ordinary->hash = 0;
+     }
+ 
+-    age = now - c->fine_birth;
+-
+-    if (age < 0) {
+-        /* The clock stepped back.  Report no age instead of a wrong one. */
+-        ngx_http_cache_fine_refuse(r, NGX_HTTP_CACHE_FINE_CLOCK);
+-        return NGX_OK;
+-    }
++    age = ngx_max(0, now - c->fine_birth);
+ 
+     c->fine_status = NGX_HTTP_CACHE_FINE_USED;
+ 
+--- a/src/http/ngx_http_file_cache.c
++++ b/src/http/ngx_http_file_cache.c
+@@ -682,8 +682,7 @@
+          */
+         refused = 0;
+ 
+-        if (msec < c->fine_birth
+-            || !ngx_http_cache_fine_continuous(c->node->fine_offset,
++        if (!ngx_http_cache_fine_continuous(c->node->fine_offset,
+                                                ngx_http_cache_fine_offset()))
+         {
+             ngx_http_cache_fine_refuse(r, NGX_HTTP_CACHE_FINE_CLOCK);

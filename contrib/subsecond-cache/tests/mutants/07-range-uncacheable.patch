@@ -1,0 +1,12 @@
+Pitfall 7: an age too large for a deadline makes the response uncacheable.
+--- a/src/http/ngx_http_cache_fine.c
++++ b/src/http/ngx_http_cache_fine.c
+@@ -544,7 +544,7 @@
+         if (c->fine_deadline <= 0) {
+             /* An age of decades.  Use the whole-second policy instead. */
+             c->fine_deadline = 0;
+-            ngx_http_cache_fine_refuse(r, NGX_HTTP_CACHE_FINE_RANGE);
++            u->cacheable = 0;
+             return NGX_OK;
+         }
+ 

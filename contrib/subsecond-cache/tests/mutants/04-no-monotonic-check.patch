@@ -1,0 +1,14 @@
+Pitfall 4: allow fine age in a build without a monotonic clock.
+--- a/src/http/ngx_http_cache.h
++++ b/src/http/ngx_http_cache.h
+@@ -73,9 +73,7 @@
+ static ngx_inline const char *
+ ngx_http_cache_fine_unsupported(ngx_uint_t monotonic, size_t time_size)
+ {
+-    if (!monotonic) {
+-        return "a monotonic clock";
+-    }
++    (void) monotonic;
+ 
+     if (time_size < 8) {
+         return "a 64-bit time_t";

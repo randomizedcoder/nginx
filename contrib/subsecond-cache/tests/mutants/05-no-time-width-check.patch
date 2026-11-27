@@ -1,0 +1,14 @@
+Pitfall 5: allow fine age where time_t cannot hold a millisecond deadline.
+--- a/src/http/ngx_http_cache.h
++++ b/src/http/ngx_http_cache.h
+@@ -77,9 +77,7 @@
+         return "a monotonic clock";
+     }
+ 
+-    if (time_size < 8) {
+-        return "a 64-bit time_t";
+-    }
++    (void) time_size;
+ 
+     return NULL;
+ }

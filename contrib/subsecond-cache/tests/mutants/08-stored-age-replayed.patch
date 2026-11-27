@@ -1,0 +1,12 @@
+Pitfall 8: serve a stored whole-second entry with the Age it arrived with.
+--- a/src/http/ngx_http_cache_fine.c
++++ b/src/http/ngx_http_cache_fine.c
+@@ -411,7 +411,7 @@
+ 
+     residence = ngx_time() - r->cache->date;
+ 
+-    if (seconds == NGX_ERROR || residence < 0) {
++    if (1 || seconds == NGX_ERROR || residence < 0) {
+         return NGX_OK;
+     }
+ 

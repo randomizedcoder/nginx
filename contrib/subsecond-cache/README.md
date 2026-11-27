@@ -9,7 +9,29 @@ Cache-Control: stale-while-revalidate=0, stale-while-revalidate-ms=200
 
 Set `proxy_cache_fine_time origin;` at the cache connected directly to the origin. Set `proxy_cache_fine_time trusted;` at an edge only if the entire upstream cache path maintains fine age. A shield might send `Age: 0` and `Age-Ms: 175`. The edge has at most 25 ms of freshness left, including its request delay. At 200 ms the response is stale. Background update needs the usual nginx proxy cache configuration.
 
-The default is `off`. To use the legacy policy at a boundary that might replay stale fine age, configure `proxy_cache_fine_time off;` and `proxy_hide_header Age-Ms;`. A trusted receiver falls back on a missing, invalid or inconsistent age pair. Presence of a plausible pair cannot identify an old cache on the path.
+| Directive | Default | Meaning |
+|---|---|---|
+| `proxy_cache_fine_time off \| origin \| trusted` | `off` | Whether this location keeps fine age, and whether its upstream is an origin or a cache trusted to send `Age-Ms` |
+| `proxy_cache_fine_age_header on \| off` | `off` | Send `Age-Ms` with responses that have fine age. Turn it on only where the recipient is a cache configured with `trusted` |
+| `proxy_cache_fine_request on \| off` | `off` | Apply request `max-age-ms` and `min-fresh-ms` |
+
+- **`Age-Ms` is withheld by default.** A cache with fine age still sends `Age`, in whole seconds, from the same estimate. Fine timing reaches a recipient only where `proxy_cache_fine_age_header on;` is set. A shield sets it for its edge; an edge serving clients leaves it off.
+- **Fine time is off by default.** To use the legacy policy at a boundary that might replay stale fine age, configure `proxy_cache_fine_time off;` and `proxy_hide_header Age-Ms;`. A trusted receiver falls back on a missing, invalid or inconsistent age pair. Presence of a plausible pair cannot identify an old cache on the path.
+- **The clock is read, not cached.** nginx updates its cached time once per event loop pass, or once per `timer_resolution` interval. Fine decisions and reported ages read the clock instead, so a millisecond value is not derived from a coarser one. The request delay is measured from a cached start time, which can only be early and so overstates the delay.
+- **A clock fault is not hidden.** An entry whose age would be negative, or whose wall clock has stepped against the monotonic clock, is not reused and no age is reported for it. `proxy_cache_fine_time` is rejected at configuration time on a build without a monotonic clock or with a 32-bit `time_t`.
+- **A whole-second entry reports its age.** In a location with fine time, a stored entry without fine age is served with `Age` equal to the age it arrived with plus the whole seconds it has been stored. Stock nginx replays the stored `Age` unchanged.
+- **Fallback is visible.** `$upstream_cache_fine_status` and an `info` log line say whether fine age was used:
+
+| `$upstream_cache_fine_status` | Meaning |
+|---|---|
+| empty | Fine time is off for the location, or the request did not use the cache |
+| `used` | The response has fine age |
+| `coarse` | The response asked for nothing fine, or cannot be stored |
+| `fallback:policy` | A companion was present, but the status is not 200, `X-Accel-Expires` applies or Cache-Control is ignored |
+| `fallback:companion` | A companion was unpaired, repeated or malformed |
+| `fallback:age` | `Age` and `Age-Ms` were missing, invalid or inconsistent, or an origin sent either |
+| `fallback:range` | The age received was too large to give a deadline |
+| `clock` | A stored entry was refused after a restart, a clock step or a suspend, and fetched again |
 
 ### Other companions
 
@@ -68,6 +90,40 @@ contrib/subsecond-cache/tests/native.sh
 
 These tests use fixed timestamps and the compiled production code. The Nix demo and integration-test builds include the rewrite module. Building with `--without-http-cache` also checks that non-cache builds compile.
 
+### Tests that catch the prototype's own mistakes
+
+An earlier version of this prototype made nine mistakes, listed in the draft under "Implementation Pitfalls". Each now has table-driven test rows, every row with a `description` and an `expected` outcome, tagged by pitfall and by kind: positive, negative, boundary or corner.
+
+The fixes were written before this harness, so this is not a test-first history. The evidence is the reverse check: each patch in `tests/mutants/` puts one mistake back into a scratch copy of the source, and the suites must then fail.
+
+```sh
+nix develop ./contrib/subsecond-cache#build -c \
+    sh contrib/subsecond-cache/tests/mutants.sh
+```
+
+It needs the `nginx-tests` checkout beside this tree, or `NGINX_TESTS_DIR`. It never patches the working tree, and exits non-zero if the unpatched source fails or any mistake is not caught. Result on 26 November 2026:
+
+| Pitfall | Mistake put back | Test tables | Rows by kind (positive, negative, boundary, corner) | Rows that failed | Result |
+|---|---|---|---|---|---|
+| 1 | Use the time nginx stored earlier | `clock.c`; `proxy_cache_fine_resolution.t` | 3, 3, 4, 5 | 13 (6 unit, 7 integration) | Caught |
+| 2 | Request delay from the stored header time | `headers.t` | 4, 2, 3, 2 | 44 unit | Caught |
+| 3 | Negative age clamped to zero | `headers.t` | 1, 1, 2, 2 | 4 unit | Caught |
+| 4 | No check for a monotonic clock | `deadlines.c`; `monotonic.t` | 3, 3, 2, 4 | 7 unit | Caught |
+| 5 | No check of the width of `time_t` | `deadlines.c` | 1, 1, 2, 2 | 3 unit | Caught |
+| 6 | `Age-Ms` sent whenever there is a fine age | `headers.t`; `proxy_cache_fine_exposure.t` | 6, 5, 2, 5 | 10 (5 unit, 5 integration) | Caught |
+| 7 | Out-of-range age makes the response uncacheable | `headers.t` | 1, 1, 2, 2 | 4 unit | Caught |
+| 8 | Stored whole-second entry served with the `Age` it arrived with | `headers.t`; `proxy_cache_fine_exposure.t` | 3, 1, 3, 2 | 6 (5 unit, 1 integration) | Caught |
+| 9 | Nothing recorded when fine age is not used | `headers.t`; `proxy_cache_fine_exposure.t` | 2, 9, 3, 4 | 41 (33 unit, 8 integration) | Caught |
+
+On the unpatched source the same run passed 44 `deadlines` rows, 9 `clock` rows, 94 `headers.t` rows, 8 `monotonic.t` rows and 209 integration tests.
+
+Limits of this evidence:
+
+- **Pitfall 4** is checked end to end by rebuilding with `NGX_HAVE_CLOCK_MONOTONIC` turned off in `objs/ngx_auto_config.h` and running `nginx -t`. That is this host's build with the macro changed, not a platform that lacks the clock.
+- **Pitfall 5** is checked only through the function that makes the decision, with the width passed in. No 32-bit build was made.
+- **Pitfall 3** has two parts. The rows catch the clamp where the age is written. The refusal of a future entry at lookup is in the same patch and has no row of its own, because it needs a clock that steps back under a running server.
+- **Pitfall 2** is caught by unit rows only. The integration test with `timer_resolution 100ms` did not fail with that mistake put back.
+
 ### Layered simulation
 
 `nix run .#layers` shows how quickly an origin update reaches a client through a chain of caches. It takes about 15 seconds. The chain follows a live stream from an origin in New York to viewers in Melbourne.
@@ -104,7 +160,7 @@ Reading the result:
 - **The lifetime has to exceed the round trip to the origin.** With `--wan`, a 100 ms response is already stale when it reaches Melbourne. Nothing is reused there and every request crosses the Pacific: 164 responses in ten seconds.
 - **At 500 ms the path works.** Melbourne reuses each response for about 266 ms. Requests that arrive during the 234 ms refresh wait for it, which is why the fine path served fewer responses. A stale-while-revalidate window would cover that gap. This run does not use one.
 - **nginx keeps a `max-age=1` entry for one to two seconds**, because it stores whole-second deadlines.
-- **The whole-second path here is nginx's behaviour, not RFC 9111's.** Stock nginx neither reads nor sends Age, so each cache applies the full `max-age` from the moment it stores a response. In this run all five caches share one clock and expire at the same second boundary, so their lifetimes did not add up. The runs change the lifetime and the age accounting together and do not isolate either.
+- **The whole-second path here is nginx's behaviour, not RFC 9111's.** Stock nginx forwards an Age field it receives, but neither interprets nor generates one, so each cache applies the full `max-age` from the moment it stores a response. In this run all five caches share one clock and expire at the same second boundary, so their lifetimes did not add up. The runs change the lifetime and the age accounting together and do not isolate either.
 - **The cost is origin requests.** One fetch per lifetime would be 10 a second at 100 ms. The rest are concurrent misses, because the caches run without `proxy_cache_lock`.
 - **`proxy_cache_lock` is off on purpose.** A request waiting on the lock checks again only every 500 ms.
 - This is one host with constant load. It measures cache behaviour, not players.
@@ -145,6 +201,15 @@ implemented behavior and reported checks, including the elapsed-time,
 Age-Ms parameter, targeted-field and Expires-only gaps. Prototype source
 revision: `9198f9a28f58b8afc8c06817f51175b4fbeea786`.
 
+Later commits on this branch read the clock for fine decisions,
+withhold `Age-Ms` unless `proxy_cache_fine_age_header on;` is set, report
+fallbacks in `$upstream_cache_fine_status`, and fall back to whole seconds
+on an out-of-range age instead of declining to store. Measurements published
+before this change used the cached clock and sent `Age-Ms` to every client.
+Still not implemented: targeted fields, `max-stale-ms`, request
+`stale-if-error-ms`, fine stale windows for Expires-only responses, and
+counting time across a restart. A fine entry is refused after a restart.
+
 Fine entries use v6 cache files on 64-bit time_t builds. The binary reads v5;
 older binaries reject v6 and refill. A 304 merges metadata and serves the
 validated body, then the next request refills. These are implementation
@@ -156,4 +221,5 @@ harness change to record failed reloads and resume completed runs. The
 [measurements](https://github.com/randomizedcoder/draft-seddon-httpbis-subsecond-freshness/blob/main/measurements.md#test-8-simulated-hls-players)
 record repetitions, results, local raw-artifact locations and missing build
 provenance. They are observations of this prototype, not a real-player or
-independent-cache result. No code tests were rerun in this document pass.
+independent-cache result. The benchmark has not been rerun since the clock
+and `Age-Ms` changes above.

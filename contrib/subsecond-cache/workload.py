@@ -200,7 +200,10 @@ def run(args, media, out, policy, paced, loaded, rep, mixed=False):
         origin_url = fine if mixed or policy in ("fine", "background") else legacy
 
         def proxy(name, upstream, binary, mode):
-            option = f"proxy_cache_fine_time {mode};" if mode else ""
+            # Age-Ms is withheld unless enabled. The shield sends it to the
+            # edge, and the edge to the players, which record it.
+            option = (f"proxy_cache_fine_time {mode}; "
+                      "proxy_cache_fine_age_header on;") if mode else ""
             return launch(name, binary, f"""
                 location / {{
                     proxy_pass {upstream};

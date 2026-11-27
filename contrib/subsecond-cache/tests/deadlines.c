@@ -63,7 +63,47 @@ main(void)
         { "negative offsets", -5000, -5004, 1 }
     };
 
+    /*
+     * Pitfalls 4 and 5: fine age is refused where elapsed time cannot be
+     * checked or a millisecond deadline does not fit.  expected is the
+     * reason for refusing, or NULL when fine age may be enabled.
+     */
+    struct {
+        const char  *description;
+        const char  *tags;
+        ngx_uint_t   monotonic;
+        size_t       time_size;
+        const char  *expected;
+    } support[] = {
+        { "monotonic clock and 64-bit time_t", "4:positive 5:positive", 1, 8,
+          NULL },
+        { "no monotonic clock", "4:negative", 0, 8, "a monotonic clock" },
+        { "32-bit time_t", "5:negative", 1, 4, "a 64-bit time_t" },
+        { "time_t one byte short of 64 bits", "5:boundary", 1, 7,
+          "a 64-bit time_t" },
+        { "time_t wider than 64 bits", "5:boundary", 1, 16, NULL },
+        { "neither: the clock is reported first", "4:corner 5:corner", 0, 4,
+          "a monotonic clock" },
+        { "no monotonic clock with a wide time_t", "4:corner", 0, 16,
+          "a monotonic clock" },
+        { "zero-width time_t", "5:corner", 1, 0, "a 64-bit time_t" }
+    };
+
     failed = 0;
+
+    for (i = 0; i < sizeof(support) / sizeof(support[0]); i++) {
+        const char  *reason;
+
+        reason = ngx_http_cache_fine_unsupported(support[i].monotonic,
+                                                 support[i].time_size);
+
+        if ((reason == NULL) != (support[i].expected == NULL)
+            || (reason && strcmp(reason, support[i].expected) != 0))
+        {
+            fprintf(stderr, "support: %s failed\n", support[i].description);
+            failed++;
+        }
+    }
 
     for (i = 0; i < sizeof(clock) / sizeof(clock[0]); i++) {
         if (ngx_http_cache_fine_continuous(clock[i].stored, clock[i].current)
@@ -94,6 +134,13 @@ main(void)
             failed++;
         }
     }
+
+    printf("deadlines: %d rows, %d failures\n",
+           (int) (sizeof(support) / sizeof(support[0])
+                  + sizeof(clock) / sizeof(clock[0])
+                  + sizeof(status) / sizeof(status[0])
+                  + sizeof(request) / sizeof(request[0])),
+           (int) failed);
 
     return failed != 0;
 }

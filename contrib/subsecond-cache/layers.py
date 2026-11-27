@@ -98,6 +98,7 @@ def cache_conf(listen, upstream, mode):
             proxy_set_header Connection "";
             proxy_cache layer;
             proxy_cache_fine_time {mode};
+            proxy_cache_fine_age_header on;
         }}
     }}"""
 

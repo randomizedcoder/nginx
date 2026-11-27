@@ -1,0 +1,12 @@
+Pitfall 2: take the request delay from the header time stored earlier.
+--- a/src/http/ngx_http_cache_fine.c
++++ b/src/http/ngx_http_cache_fine.c
+@@ -537,7 +537,7 @@
+          * to the clock reading above.  The start is a cached reading and
+          * can only be early, which overstates the delay.
+          */
+-        age += (int64_t) (ngx_msec_int_t) (ngx_current_msec - u->start_time);
++        age += u->state->header_time;
+         c->fine_birth = now - age;
+         c->fine_offset = ngx_http_cache_fine_offset();
+         c->fine_deadline = c->fine_birth + lifetime;
