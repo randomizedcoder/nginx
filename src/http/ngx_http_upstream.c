@@ -25,6 +25,8 @@ static ngx_int_t ngx_http_upstream_cache_status(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_upstream_cache_ttl(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_http_upstream_cache_fine_status(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_upstream_cache_last_modified(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_upstream_cache_etag(ngx_http_request_t *r,
@@ -463,6 +465,10 @@ static ngx_http_variable_t  ngx_http_upstream_vars[] = {
 
     { ngx_string("upstream_cache_ttl_ms"), NULL,
       ngx_http_upstream_cache_ttl, 1,
+      NGX_HTTP_VAR_NOCACHEABLE, 0 },
+
+    { ngx_string("upstream_cache_fine_status"), NULL,
+      ngx_http_upstream_cache_fine_status, 0,
       NGX_HTTP_VAR_NOCACHEABLE, 0 },
 
     { ngx_string("upstream_cache_last_modified"), NULL,
@@ -6412,6 +6418,47 @@ ngx_http_upstream_cache_ttl(ngx_http_request_t *r,
     v->no_cacheable = 0;
     v->not_found = 0;
     v->data = p;
+
+    return NGX_OK;
+}
+
+
+/*
+ * Whether fine age was used for the response, or why not.  A lookup that
+ * refused a stored entry on clock grounds reports that, whatever the
+ * response fetched in its place.
+ */
+static ngx_int_t
+ngx_http_upstream_cache_fine_status(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_uint_t        n;
+    static ngx_str_t  names[] = {
+        ngx_null_string,
+        ngx_string("used"),
+        ngx_string("coarse"),
+        ngx_string("fallback:policy"),
+        ngx_string("fallback:companion"),
+        ngx_string("fallback:age"),
+        ngx_string("fallback:range"),
+        ngx_string("clock")
+    };
+
+    if (r->upstream == NULL || r->cache == NULL
+        || r->cache->fine_status == 0)
+    {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    n = r->cache->fine_clock ? NGX_HTTP_CACHE_FINE_CLOCK
+                             : r->cache->fine_status;
+
+    v->len = names[n].len;
+    v->valid = 1;
+    v->no_cacheable = 0;
+    v->not_found = 0;
+    v->data = names[n].data;
 
     return NGX_OK;
 }

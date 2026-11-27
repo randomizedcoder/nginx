@@ -29,10 +29,24 @@ static ngx_str_t  request_directives[] = {
 };
 
 
+/* Unit tests set this to supply a fixed clock. */
+ngx_uint_t  ngx_http_cache_fine_fixed_clock;
+
+
+/*
+ * The cached time is updated once per event loop iteration, or once per
+ * timer_resolution interval.  Fine decisions and reported ages read the
+ * clock, so that a millisecond value is not derived from a coarser one.
+ * This also refreshes ngx_current_msec.
+ */
 int64_t
 ngx_http_cache_now_ms(void)
 {
     ngx_time_t  *tp;
+
+    if (!ngx_http_cache_fine_fixed_clock) {
+        ngx_time_update();
+    }
 
     tp = ngx_timeofday();
     return (int64_t) tp->sec * 1000 + tp->msec;
@@ -43,6 +57,31 @@ int64_t
 ngx_http_cache_fine_offset(void)
 {
     return ngx_http_cache_now_ms() - (int64_t) ngx_current_msec;
+}
+
+
+/* Record why fine age is not used, and say so once in the log. */
+void
+ngx_http_cache_fine_refuse(ngx_http_request_t *r, ngx_uint_t status)
+{
+    static char  *reasons[] = {
+        "", "", "",
+        "response policy excludes it",
+        "companion directive is unpaired or invalid",
+        "age fields are missing, invalid or inconsistent",
+        "age is out of range",
+        "elapsed time is uncertain"
+    };
+
+    if (status == NGX_HTTP_CACHE_FINE_CLOCK) {
+        r->cache->fine_clock = 1;
+
+    } else {
+        r->cache->fine_status = status;
+    }
+
+    ngx_log_error(NGX_LOG_INFO, r->pool->log, 0,
+                  "fine cache time not used: %s", reasons[status]);
 }
 
 
@@ -358,6 +397,35 @@ ngx_http_fine_validated(ngx_http_request_t *r)
 }
 
 
+/*
+ * A whole-second entry served from a location with fine time: add the
+ * time it has been stored to the age it arrived with.  The difference of
+ * two whole-second readings is never less than the whole seconds elapsed.
+ */
+static ngx_int_t
+ngx_http_fine_coarse_age(ngx_http_request_t *r, ngx_table_elt_t *ordinary,
+    int64_t seconds)
+{
+    time_t            residence;
+    static ngx_str_t  coarse = ngx_string("Age");
+
+    residence = ngx_time() - r->cache->date;
+
+    if (seconds == NGX_ERROR || residence < 0) {
+        return NGX_OK;
+    }
+
+    if (ordinary) {
+        ordinary->hash = 0;
+
+    } else {
+        seconds = 0;
+    }
+
+    return ngx_http_fine_add(r, coarse, seconds + residence);
+}
+
+
 ngx_int_t
 ngx_http_cache_fine_headers(ngx_http_request_t *r)
 {
@@ -411,13 +479,25 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
 
     if (!r->cached || u->fine_validation) {
         c->fine_deadline = 0;
+        c->fine_status = NGX_HTTP_CACHE_FINE_COARSE;
+
         if (!u->cacheable || u->headers_in.cache_restricted
-            || u->headers_in.status_n != NGX_HTTP_OK
+            || ngx_http_fine_policy(u->headers_in.cache_control, v) != NGX_OK
+            || (v[MAX_AGE_MS] == NGX_DECLINED && v[SHARED_MS] == NGX_DECLINED
+                && v[UPDATE_MS] == NGX_DECLINED
+                && v[ERROR_MS] == NGX_DECLINED))
+        {
+            /* Nothing fine was asked for, or nothing can be stored. */
+            return NGX_OK;
+        }
+
+        if (u->headers_in.status_n != NGX_HTTP_OK
             || (u->conf->ignore_headers & NGX_HTTP_UPSTREAM_IGN_CACHE_CONTROL)
             || (u->headers_in.x_accel_expires
-                && !(u->conf->ignore_headers & NGX_HTTP_UPSTREAM_IGN_XA_EXPIRES))
-            || ngx_http_fine_policy(u->headers_in.cache_control, v) != NGX_OK)
+                && !(u->conf->ignore_headers
+                     & NGX_HTTP_UPSTREAM_IGN_XA_EXPIRES)))
         {
+            ngx_http_cache_fine_refuse(r, NGX_HTTP_CACHE_FINE_POLICY);
             return NGX_OK;
         }
 
@@ -430,6 +510,7 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
                 && !(stale && v[UPDATE] >= 0 && v[UPDATE_MS] >= 0)
                 && !(stale && v[ERROR_AGE] >= 0 && v[ERROR_MS] >= 0)))
         {
+            ngx_http_cache_fine_refuse(r, NGX_HTTP_CACHE_FINE_COMPANION);
             return NGX_OK;
         }
 
@@ -441,6 +522,7 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
         } else if (u->conf->cache_fine_time != NGX_HTTP_CACHE_FINE_TRUSTED
                    || age < 0 || seconds != age / 1000)
         {
+            ngx_http_cache_fine_refuse(r, NGX_HTTP_CACHE_FINE_AGE);
             return NGX_OK;
         }
 
@@ -450,13 +532,19 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
             window = v[UPDATE_MS] >= 0 ? v[UPDATE_MS] : v[UPDATE] * 1000;
         }
 
-        age += u->state->header_time;
+        /*
+         * The request delay runs from the start of this upstream attempt
+         * to the clock reading above.  The start is a cached reading and
+         * can only be early, which overstates the delay.
+         */
+        age += (int64_t) (ngx_msec_int_t) (ngx_current_msec - u->start_time);
         c->fine_birth = now - age;
         c->fine_offset = ngx_http_cache_fine_offset();
         c->fine_deadline = c->fine_birth + lifetime;
         if (c->fine_deadline <= 0) {
+            /* An age of decades.  Use the whole-second policy instead. */
             c->fine_deadline = 0;
-            u->cacheable = 0;
+            ngx_http_cache_fine_refuse(r, NGX_HTTP_CACHE_FINE_RANGE);
             return NGX_OK;
         }
 
@@ -473,16 +561,36 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
     }
 
     if (c->fine_deadline == 0) {
-        return NGX_OK;
+        if (!r->cached || u->fine_validation) {
+            return NGX_OK;
+        }
+
+        c->fine_status = NGX_HTTP_CACHE_FINE_COARSE;
+
+        return ngx_http_fine_coarse_age(r, ordinary, seconds);
     }
 
     if (ordinary) {
         ordinary->hash = 0;
     }
 
-    age = ngx_max(0, now - c->fine_birth);
+    age = now - c->fine_birth;
+
+    if (age < 0) {
+        /* The clock stepped back.  Report no age instead of a wrong one. */
+        ngx_http_cache_fine_refuse(r, NGX_HTTP_CACHE_FINE_CLOCK);
+        return NGX_OK;
+    }
+
+    c->fine_status = NGX_HTTP_CACHE_FINE_USED;
+
+    /* Age and Age-Ms come from one estimate, and Age is its floor. */
     if (ngx_http_fine_add(r, coarse, age / 1000) != NGX_OK) {
         return NGX_ERROR;
+    }
+
+    if (!u->conf->cache_fine_age_header) {
+        return NGX_OK;
     }
 
     return ngx_http_fine_add(r, fine, age);

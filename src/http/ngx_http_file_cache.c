@@ -680,10 +680,21 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
          * After a restart, a clock step or a suspend the elapsed time is
          * uncertain, so the entry is neither fresh nor served stale.
          */
-        refused = !ngx_http_cache_fine_continuous(c->node->fine_offset,
-                                              ngx_http_cache_fine_offset())
-                  || (r->upstream->conf->cache_fine_request
-                      && ngx_http_cache_fine_refused(r, msec));
+        refused = 0;
+
+        if (msec < c->fine_birth
+            || !ngx_http_cache_fine_continuous(c->node->fine_offset,
+                                               ngx_http_cache_fine_offset()))
+        {
+            ngx_http_cache_fine_refuse(r, NGX_HTTP_CACHE_FINE_CLOCK);
+            refused = 1;
+
+        } else if (r->upstream->conf->cache_fine_request
+                   && ngx_http_cache_fine_refused(r, msec))
+        {
+            refused = 1;
+        }
+
         if (rc == NGX_HTTP_CACHE_HIT && !refused) {
             return NGX_OK;
         }

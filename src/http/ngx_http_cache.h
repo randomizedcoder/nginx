@@ -26,6 +26,8 @@
 ngx_int_t ngx_http_cache_fine_headers(ngx_http_request_t *r);
 ngx_uint_t ngx_http_cache_fine_refused(ngx_http_request_t *r, int64_t now);
 int64_t ngx_http_cache_now_ms(void);
+void ngx_http_cache_fine_refuse(ngx_http_request_t *r, ngx_uint_t status);
+extern ngx_uint_t  ngx_http_cache_fine_fixed_clock;
 int64_t ngx_http_cache_fine_offset(void);
 
 /*
@@ -63,6 +65,26 @@ ngx_http_cache_fine_status(int64_t now, int64_t deadline, int64_t window)
 }
 
 
+/*
+ * Fine age needs a monotonic clock, to detect steps of the wall clock, and
+ * a time_t wide enough for millisecond deadlines.  Returns what is missing,
+ * or NULL when fine age can be enabled.
+ */
+static ngx_inline const char *
+ngx_http_cache_fine_unsupported(ngx_uint_t monotonic, size_t time_size)
+{
+    if (!monotonic) {
+        return "a monotonic clock";
+    }
+
+    if (time_size < 8) {
+        return "a 64-bit time_t";
+    }
+
+    return NULL;
+}
+
+
 /* A negative limit means the request did not send that directive. */
 static ngx_inline ngx_uint_t
 ngx_http_cache_fine_acceptable(int64_t age, int64_t remaining,
@@ -82,6 +104,15 @@ ngx_http_cache_fine_acceptable(int64_t age, int64_t remaining,
 
 #define NGX_HTTP_CACHE_FINE_ORIGIN   1
 #define NGX_HTTP_CACHE_FINE_TRUSTED  2
+
+/* Why a response did or did not get fine age, for logs and the variable. */
+#define NGX_HTTP_CACHE_FINE_USED       1
+#define NGX_HTTP_CACHE_FINE_COARSE     2
+#define NGX_HTTP_CACHE_FINE_POLICY     3
+#define NGX_HTTP_CACHE_FINE_COMPANION  4
+#define NGX_HTTP_CACHE_FINE_AGE        5
+#define NGX_HTTP_CACHE_FINE_RANGE      6
+#define NGX_HTTP_CACHE_FINE_CLOCK      7
 
 
 typedef struct {
@@ -136,6 +167,8 @@ struct ngx_http_cache_s {
     int64_t                          fine_window;
     int64_t                          fine_error;
     int64_t                          fine_offset;
+    ngx_uint_t                       fine_status;
+    ngx_uint_t                       fine_clock;
 
     ngx_str_t                        etag;
     ngx_str_t                        vary;
