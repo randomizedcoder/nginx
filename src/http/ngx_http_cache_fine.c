@@ -72,6 +72,9 @@ ngx_http_cache_fine_refuse(ngx_http_request_t *r, ngx_uint_t status)
         "age is out of range",
         "elapsed time is uncertain"
     };
+    ngx_int_t          skipped;
+    static time_t      last[NGX_HTTP_CACHE_FINE_CLOCK + 1];
+    static ngx_uint_t  left_out[NGX_HTTP_CACHE_FINE_CLOCK + 1];
 
     if (status == NGX_HTTP_CACHE_FINE_CLOCK) {
         r->cache->fine_clock = 1;
@@ -80,8 +83,15 @@ ngx_http_cache_fine_refuse(ngx_http_request_t *r, ngx_uint_t status)
         r->cache->fine_status = status;
     }
 
+    skipped = ngx_http_cache_fine_log_due(ngx_time(), &last[status],
+                                          &left_out[status]);
+    if (skipped < 0) {
+        return;
+    }
+
     ngx_log_error(NGX_LOG_INFO, r->pool->log, 0,
-                  "fine cache time not used: %s", reasons[status]);
+                  "fine cache time not used: %s, "
+                  "%i similar messages not logged", reasons[status], skipped);
 }
 
 
@@ -328,6 +338,139 @@ ngx_http_fine_metadata(ngx_str_t *key)
 }
 
 
+/*
+ * Find the value of a field in the stored header block.  Returns the
+ * number of field lines with that name; *value is the last one found.
+ */
+static ngx_uint_t
+ngx_http_fine_stored(ngx_http_cache_t *c, ngx_str_t *name, ngx_str_t *value)
+{
+    u_char      *p, *end, *eol, *colon;
+    ngx_uint_t   n;
+
+    n = 0;
+    p = c->buf->pos + c->header_start;
+    end = c->buf->pos + c->body_start;
+
+    if (end > c->buf->last) {
+        return 0;
+    }
+
+    /* The first line is the status line. */
+
+    while (p < end) {
+        eol = ngx_strlchr(p, end, LF);
+        if (eol == NULL) {
+            break;
+        }
+
+        colon = ngx_strlchr(p, eol, ':');
+
+        if (colon && (size_t) (colon - p) == name->len
+            && ngx_strncasecmp(p, name->data, name->len) == 0)
+        {
+            colon++;
+            while (colon < eol && *colon == ' ') {
+                colon++;
+            }
+
+            value->data = colon;
+            while (eol > colon && (eol[-1] == CR || eol[-1] == ' ')) {
+                eol--;
+            }
+            value->len = eol - colon;
+
+            eol = ngx_strlchr(colon, end, LF);
+            n++;
+        }
+
+        p = eol + 1;
+    }
+
+    return n;
+}
+
+
+/*
+ * Decide whether a 304 leaves the stored header block the same length, and
+ * if so apply it to the block in memory.  That holds when each metadata
+ * field of the 304 equals the stored one, or is a Date or Cache-Control of
+ * the same length.  The stored Age fields are not used for a fine entry.
+ */
+static void
+ngx_http_fine_inplace(ngx_http_request_t *r)
+{
+    ngx_str_t                        value, replacement;
+    ngx_uint_t                       j, pass;
+    ngx_list_part_t                 *v;
+    ngx_table_elt_t                 *new;
+    ngx_http_cache_t                *c;
+    ngx_http_upstream_headers_in_t  *validation;
+
+    c = r->cache;
+    validation = r->upstream->fine_validation;
+
+    c->fine_inplace = 0;
+
+    if (c->buf == NULL) {
+        return;
+    }
+
+    /* Check every field first, then change the block. */
+
+    for (pass = 0; pass < 2; pass++) {
+        for (v = &validation->headers.part; v; v = v->next) {
+            new = v->elts;
+            for (j = 0; j < v->nelts; j++) {
+                if (!new[j].hash || !ngx_http_fine_metadata(&new[j].key)
+                    || ngx_http_fine_name(new[j].key.data, new[j].key.len,
+                                          "age", 3)
+                    || ngx_http_fine_name(new[j].key.data, new[j].key.len,
+                                          "age-ms", 6))
+                {
+                    continue;
+                }
+
+                replacement = new[j].value;
+
+                if (replacement.len == 0
+                    && ngx_http_fine_name(new[j].key.data, new[j].key.len,
+                                          "date", 4))
+                {
+                    /* The 304 had no Date, and this server's is sent. */
+                    replacement = ngx_cached_http_time;
+                }
+
+                if (ngx_http_fine_stored(c, &new[j].key, &value) != 1
+                    || value.len != replacement.len)
+                {
+                    return;
+                }
+
+                if (ngx_memcmp(value.data, replacement.data, value.len) == 0)
+                {
+                    continue;
+                }
+
+                if (!ngx_http_fine_name(new[j].key.data, new[j].key.len,
+                                        "date", 4)
+                    && !ngx_http_fine_name(new[j].key.data, new[j].key.len,
+                                           "cache-control", 13))
+                {
+                    return;
+                }
+
+                if (pass) {
+                    ngx_memcpy(value.data, replacement.data, value.len);
+                }
+            }
+        }
+    }
+
+    c->fine_inplace = 1;
+}
+
+
 /* Replace cached response metadata supplied by the validation exchange. */
 static ngx_int_t
 ngx_http_fine_validated(ngx_http_request_t *r)
@@ -423,6 +566,22 @@ ngx_http_fine_coarse_age(ngx_http_request_t *r, ngx_table_elt_t *ordinary,
     }
 
     return ngx_http_fine_add(r, coarse, seconds + residence);
+}
+
+
+/* After a 304: update the stored entry in place, or retire it. */
+void
+ngx_http_cache_fine_update(ngx_http_request_t *r, ngx_int_t rc)
+{
+    if (r->upstream->fine_validation == NULL || r->cache == NULL) {
+        return;
+    }
+
+    if (rc == NGX_OK) {
+        ngx_http_fine_inplace(r);
+    }
+
+    ngx_http_file_cache_update_header(r);
 }
 
 

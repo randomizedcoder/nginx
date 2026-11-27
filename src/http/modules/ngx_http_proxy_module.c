@@ -4172,6 +4172,28 @@ ngx_http_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         clcf->handler = ngx_http_proxy_handler;
     }
 
+#if (NGX_HTTP_CACHE)
+
+    if (conf->upstream.cache_zone
+        && (conf->upstream.upstream || conf->proxy_lengths))
+    {
+        ngx_http_file_cache_t  *cache;
+
+        cache = conf->upstream.cache_zone->data;
+
+        if (ngx_http_cache_fine_zone_mixed(&cache->fine,
+                                           conf->upstream.cache_fine_time))
+        {
+            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                               "cache zone \"%V\" is used with and without "
+                               "\"proxy_cache_fine_time\"; a key requested "
+                               "both ways is fetched again each time",
+                               &conf->upstream.cache_zone->shm.name);
+        }
+    }
+
+#endif
+
     if (conf->body_source.data == NULL) {
         conf->body_flushes = prev->body_flushes;
         conf->body_source = prev->body_source;

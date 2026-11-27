@@ -456,7 +456,8 @@ ngx_http_file_cache_lock(ngx_http_request_t *r, ngx_http_cache_t *c)
 
     timer = c->wait_time - now;
 
-    ngx_add_timer(&c->wait_event, (timer > 500) ? 500 : timer);
+    ngx_add_timer(&c->wait_event,
+                  ngx_http_cache_lock_wait(timer, &c->lock_wait));
 
     r->main->blocked++;
 
@@ -535,7 +536,8 @@ ngx_http_file_cache_lock_wait(ngx_http_request_t *r, ngx_http_cache_t *c)
     ngx_shmtx_unlock(&cache->shpool->mutex);
 
     if (wait) {
-        ngx_add_timer(&c->wait_event, (timer > 500) ? 500 : timer);
+        ngx_add_timer(&c->wait_event,
+                      ngx_http_cache_lock_wait(timer, &c->lock_wait));
         return NGX_AGAIN;
     }
 
@@ -1630,10 +1632,42 @@ ngx_http_file_cache_update_header(ngx_http_request_t *r)
         && r->upstream->fine_validation && h.crc32 == c->crc32)
     {
         /*
-         * The cached header block can change length on a 304. Refill it
-         * on the next request, after serving this validated response.
          * The file identity and length have been checked above.
+         *
+         * Where the 304 changed nothing stored, or only values of the
+         * same length, the header block has been patched in memory: write
+         * it back with the new times.  A reader between the two writes
+         * sees the old, expired times and validates again.
+         *
+         * Otherwise the header block would change length.  Retire the
+         * entry, so that the next request refills it.
          */
+        if (c->fine_inplace && c->fine_deadline
+            && (size_t) h.header_start == c->header_start
+            && (size_t) h.body_start == c->body_start
+            && (size_t) (c->buf->last - c->buf->pos) >= c->body_start)
+        {
+            (void) ngx_write_file(&file, c->buf->pos + c->header_start,
+                                  c->body_start - c->header_start,
+                                  c->header_start);
+
+            h.date = c->fine_birth;
+            h.valid_sec = c->fine_deadline;
+            h.updating_sec = c->fine_window;
+            h.error_sec = c->fine_error;
+
+            (void) ngx_write_file(&file, (u_char *) &h,
+                                  sizeof(ngx_http_file_cache_header_t), 0);
+
+            ngx_shmtx_lock(&c->file_cache->shpool->mutex);
+            c->node->fine_offset = c->fine_offset;
+            c->node->valid_sec = c->valid_sec;
+            c->node->valid_msec = c->valid_msec;
+            ngx_shmtx_unlock(&c->file_cache->shpool->mutex);
+
+            goto done;
+        }
+
         h.version = 0;
         (void) ngx_write_file(&file, (u_char *) &h.version,
                               sizeof(h.version), 0);

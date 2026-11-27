@@ -24,6 +24,7 @@
 #define NGX_HTTP_CACHE_SCARCE        8
 
 ngx_int_t ngx_http_cache_fine_headers(ngx_http_request_t *r);
+void ngx_http_cache_fine_update(ngx_http_request_t *r, ngx_int_t rc);
 ngx_uint_t ngx_http_cache_fine_refused(ngx_http_request_t *r, int64_t now);
 int64_t ngx_http_cache_now_ms(void);
 void ngx_http_cache_fine_refuse(ngx_http_request_t *r, ngx_uint_t status);
@@ -62,6 +63,76 @@ ngx_http_cache_fine_status(int64_t now, int64_t deadline, int64_t window)
     }
 
     return NGX_HTTP_CACHE_EXPIRED;
+}
+
+
+/*
+ * A fallback is logged at most once a second for each reason.  Returns the
+ * number of lines left out since the last one written, or -1 when this
+ * one is to be left out.
+ */
+static ngx_inline ngx_int_t
+ngx_http_cache_fine_log_due(time_t now, time_t *last, ngx_uint_t *skipped)
+{
+    ngx_int_t  n;
+
+    if (now == *last) {
+        (*skipped)++;
+        return -1;
+    }
+
+    n = (ngx_int_t) *skipped;
+    *last = now;
+    *skipped = 0;
+
+    return n;
+}
+
+
+/*
+ * A request waiting for the cache lock looks again after this interval.
+ * Stock nginx uses 500 ms, which is longer than a sub-second lifetime: the
+ * response the waiter was waiting for is stale again when it looks.  With
+ * fine time the first interval is short and each later one is doubled, up
+ * to the stock value.
+ */
+#define NGX_HTTP_CACHE_LOCK_WAIT       500
+#define NGX_HTTP_CACHE_FINE_LOCK_WAIT  5
+
+static ngx_inline ngx_msec_t
+ngx_http_cache_lock_wait(ngx_msec_t remaining, ngx_msec_t *wait)
+{
+    ngx_msec_t  timer;
+
+    if (*wait == 0) {
+        *wait = NGX_HTTP_CACHE_LOCK_WAIT;
+    }
+
+    timer = (remaining > *wait) ? *wait : remaining;
+
+    *wait = (*wait >= NGX_HTTP_CACHE_LOCK_WAIT / 2) ? NGX_HTTP_CACHE_LOCK_WAIT
+                                                    : *wait * 2;
+
+    return timer;
+}
+
+
+/*
+ * A cache zone holds one file version for each key.  Locations that share
+ * a zone and differ in fine time replace each other's files.  Records the
+ * first setting seen for the zone and reports a later one that differs.
+ */
+static ngx_inline ngx_uint_t
+ngx_http_cache_fine_zone_mixed(ngx_uint_t *recorded, ngx_uint_t fine)
+{
+    fine = fine ? 2 : 1;
+
+    if (*recorded == 0) {
+        *recorded = fine;
+        return 0;
+    }
+
+    return *recorded != fine;
 }
 
 
@@ -169,6 +240,7 @@ struct ngx_http_cache_s {
     int64_t                          fine_offset;
     ngx_uint_t                       fine_status;
     ngx_uint_t                       fine_clock;
+    ngx_uint_t                       fine_inplace;
 
     ngx_str_t                        etag;
     ngx_str_t                        vary;
@@ -198,6 +270,7 @@ struct ngx_http_cache_s {
     ngx_msec_t                       lock_age;
     ngx_msec_t                       lock_time;
     ngx_msec_t                       wait_time;
+    ngx_msec_t                       lock_wait;
 
     ngx_event_t                      wait_event;
 
@@ -278,6 +351,9 @@ struct ngx_http_file_cache_s {
 
     ngx_uint_t                       use_temp_path;
                                      /* unsigned use_temp_path:1 */
+
+    ngx_uint_t                       fine;
+                                     /* 0 unknown, 1 whole seconds, 2 fine */
 };
 
 

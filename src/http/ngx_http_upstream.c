@@ -959,6 +959,9 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
         c->lock = u->conf->cache_lock;
         c->lock_timeout = u->conf->cache_lock_timeout;
         c->lock_age = u->conf->cache_lock_age;
+        c->lock_wait = u->conf->cache_fine_time
+                       ? NGX_HTTP_CACHE_FINE_LOCK_WAIT
+                       : NGX_HTTP_CACHE_LOCK_WAIT;
 
         u->cache_status = NGX_HTTP_CACHE_MISS;
     }
@@ -2909,8 +2912,10 @@ ngx_http_upstream_test_next(ngx_http_request_t *r, ngx_http_upstream_t *u)
             }
             *u->fine_validation = u->headers_in;
 
-            /* Retire the old policy before replaying the validated body. */
-            ngx_http_file_cache_update_header(r);
+            /*
+             * The stored entry is updated or retired once the 304 has
+             * been merged, in ngx_http_upstream_process_headers().
+             */
         }
 
         valid = r->cache->valid_sec;
@@ -3134,8 +3139,21 @@ ngx_http_upstream_process_headers(ngx_http_request_t *r, ngx_http_upstream_t *u)
     umcf = ngx_http_get_module_main_conf(r, ngx_http_upstream_module);
 
 #if (NGX_HTTP_CACHE)
-    if (u->conf->cache_fine_time && ngx_http_cache_fine_headers(r) != NGX_OK) {
-        return NGX_ERROR;
+    if (u->conf->cache_fine_time) {
+        ngx_int_t  rc;
+
+        rc = ngx_http_cache_fine_headers(r);
+
+        /*
+         * A 304 has been merged and the new times are known.  Update the
+         * stored entry in place where its header block keeps its length,
+         * or retire it.
+         */
+        ngx_http_cache_fine_update(r, rc);
+
+        if (rc != NGX_OK) {
+            return NGX_ERROR;
+        }
     }
 #endif
 
