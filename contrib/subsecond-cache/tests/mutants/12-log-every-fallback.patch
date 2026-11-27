@@ -1,0 +1,14 @@
+Problem 12: every fallback writes a log line.
+--- a/src/http/ngx_http_cache_fine.c
++++ b/src/http/ngx_http_cache_fine.c
+@@ -85,10 +85,6 @@
+ 
+     skipped = ngx_http_cache_fine_log_due(ngx_time(), &last[status],
+                                           &left_out[status]);
+-    if (skipped < 0) {
+-        return;
+-    }
+-
+     ngx_log_error(NGX_LOG_INFO, r->pool->log, 0,
+                   "fine cache time not used: %s, "
+                   "%i similar messages not logged", reasons[status], skipped);

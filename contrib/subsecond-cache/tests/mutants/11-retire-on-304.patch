@@ -1,0 +1,12 @@
+Problem 11: every fine entry is retired after a 304 and fetched again in full.
+--- a/src/http/ngx_http_file_cache.c
++++ b/src/http/ngx_http_file_cache.c
+@@ -1642,7 +1642,7 @@
+          * Otherwise the header block would change length.  Retire the
+          * entry, so that the next request refills it.
+          */
+-        if (c->fine_inplace && c->fine_deadline
++        if (0 && c->fine_inplace && c->fine_deadline
+             && (size_t) h.header_start == c->header_start
+             && (size_t) h.body_start == c->body_start
+             && (size_t) (c->buf->last - c->buf->pos) >= c->body_start)

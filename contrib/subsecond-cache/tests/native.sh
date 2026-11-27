@@ -24,4 +24,5 @@ status=0
 "$dir/clock" || status=1
 FINE_HEADERS_BINARY="$dir/headers" prove -v "$tests/headers.t" || status=1
 FINE_NGINX_BINARY=objs/nginx prove -v "$tests/monotonic.t" || status=1
+FINE_NGINX_BINARY=objs/nginx prove -v "$tests/zones.t" || status=1
 exit $status

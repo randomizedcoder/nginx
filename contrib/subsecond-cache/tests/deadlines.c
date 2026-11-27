@@ -89,7 +89,124 @@ main(void)
         { "zero-width time_t", "5:corner", 1, 0, "a 64-bit time_t" }
     };
 
+    /*
+     * Problem 10: a request waiting for the cache lock looks again after
+     * an interval that starts short with fine time and doubles.  Each row
+     * gives the time left to wait and the interval so far; expected is
+     * the timer set and the interval for the next look.
+     */
+    struct {
+        const char  *description;
+        const char  *tags;
+        ngx_msec_t   remaining, wait;
+        ngx_msec_t   expected, expected_next;
+    } lock[] = {
+        { "fine time, first look", "10:positive", 5000, 5, 5, 10 },
+        { "fine time, second look", "10:positive", 5000, 10, 10, 20 },
+        { "fine time, eighth look reaches the stock interval",
+          "10:boundary", 5000, 320, 320, 500 },
+        { "doubling stops at the stock interval", "10:boundary", 5000, 250,
+          250, 500 },
+        { "one below half the stock interval still doubles", "10:boundary",
+          5000, 249, 249, 498 },
+        { "stock location keeps 500 ms", "10:negative", 5000, 500, 500, 500 },
+        { "time left is shorter than the interval", "10:corner", 3, 5, 3,
+          10 },
+        { "no time left", "10:corner", 0, 5, 0, 10 },
+        { "interval never set is the stock one", "10:corner", 5000, 0, 500,
+          500 }
+    };
+
+    /*
+     * Problem 12: one log line per reason per second.  Each row is one
+     * fallback at time now, after a line at time last with some left out
+     * since; expected is the count reported, or -1 for no line.
+     */
+    struct {
+        const char  *description;
+        const char  *tags;
+        time_t       now, last;
+        ngx_uint_t   skipped;
+        ngx_int_t    expected;
+        ngx_uint_t   expected_skipped;
+    } logged[] = {
+        { "first fallback is logged", "12:positive", 100, 0, 0, 0, 0 },
+        { "second fallback in the same second is not", "12:negative", 100,
+          100, 0, -1, 1 },
+        { "twentieth in the same second is not", "12:negative", 100, 100, 18,
+          -1, 19 },
+        { "first in the next second reports those left out", "12:boundary",
+          101, 100, 19, 19, 0 },
+        { "next second with none left out", "12:boundary", 101, 100, 0, 0,
+          0 },
+        { "clock stepped back is logged", "12:corner", 99, 100, 4, 4, 0 },
+        { "long quiet period", "12:corner", 100000, 100, 1, 1, 0 }
+    };
+
+    /*
+     * Problem 13: a zone used with and without fine time.  Each row is a
+     * location that uses a zone whose recorded setting is given (0 none,
+     * 1 whole seconds, 2 fine); expected is whether to warn.
+     */
+    struct {
+        const char  *description;
+        const char  *tags;
+        ngx_uint_t   recorded, fine;
+        ngx_uint_t   expected, expected_recorded;
+    } zone[] = {
+        { "first location, whole seconds", "13:positive", 0, 0, 0, 1 },
+        { "first location, fine", "13:positive", 0, 1, 0, 2 },
+        { "second fine location", "13:positive", 2, 1, 0, 2 },
+        { "second whole-second location", "13:positive", 1, 0, 0, 1 },
+        { "fine location on a whole-second zone", "13:negative", 1, 1, 1, 1 },
+        { "whole-second location on a fine zone", "13:negative", 2, 0, 1, 2 },
+        { "trusted and origin are both fine", "13:boundary", 2, 2, 0, 2 },
+        { "a third location still warns", "13:corner", 1, 2, 1, 1 }
+    };
+
     failed = 0;
+
+    for (i = 0; i < sizeof(lock) / sizeof(lock[0]); i++) {
+        ngx_msec_t  wait, timer;
+
+        wait = lock[i].wait;
+        timer = ngx_http_cache_lock_wait(lock[i].remaining, &wait);
+
+        if (timer != lock[i].expected || wait != lock[i].expected_next) {
+            fprintf(stderr, "lock: %s failed\n", lock[i].description);
+            failed++;
+        }
+    }
+
+    for (i = 0; i < sizeof(logged) / sizeof(logged[0]); i++) {
+        time_t      last;
+        ngx_uint_t  skipped;
+
+        last = logged[i].last;
+        skipped = logged[i].skipped;
+
+        if (ngx_http_cache_fine_log_due(logged[i].now, &last, &skipped)
+            != logged[i].expected
+            || skipped != logged[i].expected_skipped)
+        {
+            fprintf(stderr, "logged: %s failed\n", logged[i].description);
+            failed++;
+        }
+    }
+
+    for (i = 0; i < sizeof(zone) / sizeof(zone[0]); i++) {
+        ngx_uint_t  recorded;
+
+        recorded = zone[i].recorded;
+
+        if (ngx_http_cache_fine_zone_mixed(&recorded, zone[i].fine)
+            != zone[i].expected
+            || recorded != zone[i].expected_recorded)
+        {
+            fprintf(stderr, "zone: %s failed\n", zone[i].description);
+            failed++;
+        }
+    }
 
     for (i = 0; i < sizeof(support) / sizeof(support[0]); i++) {
         const char  *reason;
@@ -137,6 +254,9 @@ main(void)
 
     printf("deadlines: %d rows, %d failures\n",
            (int) (sizeof(support) / sizeof(support[0])
+                  + sizeof(lock) / sizeof(lock[0])
+                  + sizeof(logged) / sizeof(logged[0])
+                  + sizeof(zone) / sizeof(zone[0])
                   + sizeof(clock) / sizeof(clock[0])
                   + sizeof(status) / sizeof(status[0])
                   + sizeof(request) / sizeof(request[0])),

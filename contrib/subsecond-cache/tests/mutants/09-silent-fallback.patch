@@ -1,9 +1,13 @@
 Pitfall 9: record and log nothing when fine age is not used.
 --- a/src/http/ngx_http_cache_fine.c
 +++ b/src/http/ngx_http_cache_fine.c
-@@ -73,15 +73,9 @@
+@@ -72,26 +72,10 @@
+         "age is out of range",
          "elapsed time is uncertain"
      };
+-    ngx_int_t          skipped;
+-    static time_t      last[NGX_HTTP_CACHE_FINE_CLOCK + 1];
+-    static ngx_uint_t  left_out[NGX_HTTP_CACHE_FINE_CLOCK + 1];
  
 -    if (status == NGX_HTTP_CACHE_FINE_CLOCK) {
 -        r->cache->fine_clock = 1;
@@ -12,8 +16,15 @@ Pitfall 9: record and log nothing when fine age is not used.
 -        r->cache->fine_status = status;
 -    }
 -
+-    skipped = ngx_http_cache_fine_log_due(ngx_time(), &last[status],
+-                                          &left_out[status]);
+-    if (skipped < 0) {
+-        return;
+-    }
+-
 -    ngx_log_error(NGX_LOG_INFO, r->pool->log, 0,
--                  "fine cache time not used: %s", reasons[status]);
+-                  "fine cache time not used: %s, "
+-                  "%i similar messages not logged", reasons[status], skipped);
 +    (void) r;
 +    (void) reasons;
 +    (void) status;

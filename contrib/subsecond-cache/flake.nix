@@ -31,7 +31,7 @@
         # Fork of nginx/nginx-tests carrying the proxy_cache_fine*.t tests.
         url = "https://github.com/randomizedcoder/nginx-tests.git";
         ref = "http-cache-millisecond-freshness";
-        rev = "e64108af74fc4cc9fd1faac6bba731e034d75037";
+        rev = "1e94e7760cb689f541899e8a306ad9d26e36e533";
       };
       experiment = name: pkgs.writeShellApplication {
         inherit name;

@@ -43,7 +43,7 @@ Set `proxy_cache_fine_time origin;` at the cache connected directly to the origi
 | `max-stale-ms`, request `stale-if-error-ms` | Not implemented. |
 | `Retry-After-Ms`, Prefer `wait-ms` | Passed through. nginx neither generates nor consumes these. |
 
-`proxy_cache_fine_request` defaults to `off`, because stock nginx ignores request Cache-Control and a client could otherwise force origin fetches. A missing or invalid base directive leaves the request unconstrained. An invalid companion yields to its base.
+`proxy_cache_fine_request` defaults to `off`, because stock nginx ignores request Cache-Control and a client could otherwise force origin fetches. With it on, any client can send `Cache-Control: max-age=0` and turn each of its requests into an origin request. Enable it only where clients are trusted, or behind `limit_req`. A missing or invalid base directive leaves the request unconstrained. An invalid companion yields to its base.
 
 nginx honours stale-if-error only for failures that reach `ngx_http_upstream_next`, such as connection errors and timeouts. That is unchanged.
 
@@ -92,30 +92,36 @@ These tests use fixed timestamps and the compiled production code. The Nix demo 
 
 ### Tests that catch the prototype's own mistakes
 
-An earlier version of this prototype made nine mistakes, listed in the draft under "Implementation Pitfalls". Each now has table-driven test rows, every row with a `description` and an `expected` outcome, tagged by pitfall and by kind: positive, negative, boundary or corner.
+An earlier version of this prototype made nine mistakes, listed in the draft under "Implementation Pitfalls", and a later review found four more problems. Each now has table-driven test rows, every row with a `description` and an `expected` outcome, tagged by pitfall and by kind: positive, negative, boundary or corner.
 
-The fixes were written before this harness, so this is not a test-first history. The evidence is the reverse check: each patch in `tests/mutants/` puts one mistake back into a scratch copy of the source, and the suites must then fail.
+The first nine fixes were written before this harness, so theirs is not a test-first history. The evidence is the reverse check: each patch in `tests/mutants/` puts one mistake back into a scratch copy of the source, and the suites must then fail.
 
 ```sh
 nix develop ./contrib/subsecond-cache#build -c \
     sh contrib/subsecond-cache/tests/mutants.sh
 ```
 
-It needs the `nginx-tests` checkout beside this tree, or `NGINX_TESTS_DIR`. It never patches the working tree, and exits non-zero if the unpatched source fails or any mistake is not caught. Result on 26 November 2026:
+It needs the `nginx-tests` checkout beside this tree, or `NGINX_TESTS_DIR`. It never patches the working tree, and exits non-zero if the unpatched source fails or any mistake is not caught. Result on 27 November 2026:
 
 | Pitfall | Mistake put back | Test tables | Rows by kind (positive, negative, boundary, corner) | Rows that failed | Result |
 |---|---|---|---|---|---|
-| 1 | Use the time nginx stored earlier | `clock.c`; `proxy_cache_fine_resolution.t` | 3, 3, 4, 5 | 13 (6 unit, 7 integration) | Caught |
+| 1 | Use the time nginx stored earlier | `clock.c`; `proxy_cache_fine_resolution.t` | 3, 3, 4, 5 | 16 (6 unit, 10 integration) | Caught |
 | 2 | Request delay from the stored header time | `headers.t` | 4, 2, 3, 2 | 44 unit | Caught |
-| 3 | Negative age clamped to zero | `headers.t` | 1, 1, 2, 2 | 4 unit | Caught |
+| 3 | Negative age clamped to zero | `headers.t` | 1, 1, 2, 2 | 6 (4 unit, 2 integration) | Caught |
 | 4 | No check for a monotonic clock | `deadlines.c`; `monotonic.t` | 3, 3, 2, 4 | 7 unit | Caught |
 | 5 | No check of the width of `time_t` | `deadlines.c` | 1, 1, 2, 2 | 3 unit | Caught |
 | 6 | `Age-Ms` sent whenever there is a fine age | `headers.t`; `proxy_cache_fine_exposure.t` | 6, 5, 2, 5 | 10 (5 unit, 5 integration) | Caught |
 | 7 | Out-of-range age makes the response uncacheable | `headers.t` | 1, 1, 2, 2 | 4 unit | Caught |
 | 8 | Stored whole-second entry served with the `Age` it arrived with | `headers.t`; `proxy_cache_fine_exposure.t` | 3, 1, 3, 2 | 6 (5 unit, 1 integration) | Caught |
-| 9 | Nothing recorded when fine age is not used | `headers.t`; `proxy_cache_fine_exposure.t` | 2, 9, 3, 4 | 41 (33 unit, 8 integration) | Caught |
+| 9 | Nothing recorded when fine age is not used | `headers.t`; `proxy_cache_fine_exposure.t` | 2, 9, 3, 4 | 44 (33 unit, 11 integration) | Caught |
+| 10 | Lock waiter checks every 500 ms | `deadlines.c`; `proxy_cache_fine_lock.t` | 4, 2, 5, 6 | 4 integration | Caught |
+| 11 | Every fine entry retired after a 304 | `proxy_cache_fine_validate.t` | 2, 2, 2, 4 | 14 integration | Caught |
+| 12 | A log line for every fallback | `deadlines.c`; `proxy_cache_fine_exposure.t` | 2, 3, 3, 3 | 2 integration | Caught |
+| 13 | No warning for a zone used both ways | `deadlines.c`; `zones.t` | 6, 4, 3, 5 | 3 unit | Caught |
 
-On the unpatched source the same run passed 44 `deadlines` rows, 9 `clock` rows, 94 `headers.t` rows, 8 `monotonic.t` rows and 209 integration tests.
+Rows 10 to 13 are the later problems under "Known operational problems".
+
+On the unpatched source the same run passed 68 `deadlines` rows, 9 `clock` rows, 94 `headers.t` rows, 8 `monotonic.t` rows, 10 `zones.t` rows and 326 integration tests.
 
 Limits of this evidence:
 
@@ -123,6 +129,7 @@ Limits of this evidence:
 - **Pitfall 5** is checked only through the function that makes the decision, with the width passed in. No 32-bit build was made.
 - **Pitfall 3** has two parts. The rows catch the clamp where the age is written. The refusal of a future entry at lookup is in the same patch and has no row of its own, because it needs a clock that steps back under a running server.
 - **Pitfall 2** is caught by unit rows only. The integration test with `timer_resolution 100ms` did not fail with that mistake put back.
+- **Integration counts vary between runs** for pitfalls 1 to 3, where rows depend on timing. Problems 10, 11 and 12 are caught by integration rows only: their unit rows test the helper, and the patch changes the caller.
 
 ### Layered simulation
 
@@ -162,7 +169,7 @@ Reading the result:
 - **nginx keeps a `max-age=1` entry for one to two seconds**, because it stores whole-second deadlines.
 - **The whole-second path here is nginx's behaviour, not RFC 9111's.** Stock nginx forwards an Age field it receives, but neither interprets nor generates one, so each cache applies the full `max-age` from the moment it stores a response. In this run all five caches share one clock and expire at the same second boundary, so their lifetimes did not add up. The runs change the lifetime and the age accounting together and do not isolate either.
 - **The cost is origin requests.** One fetch per lifetime would be 10 a second at 100 ms. The rest are concurrent misses, because the caches run without `proxy_cache_lock`.
-- **`proxy_cache_lock` is off on purpose.** A request waiting on the lock checks again only every 500 ms.
+- **`proxy_cache_lock` was off in these runs.** At the time a request waiting on the lock checked again only every 500 ms. A fine location now starts at 5 ms; see "Known operational problems". The runs have not been repeated with the lock on.
 - This is one host with constant load. It measures cache behaviour, not players.
 
 Options, after `--`:
@@ -210,9 +217,31 @@ Still not implemented: targeted fields, `max-stale-ms`, request
 `stale-if-error-ms`, fine stale windows for Expires-only responses, and
 counting time across a restart. A fine entry is refused after a restart.
 
+### Known operational problems
+
+Found in review after the nine fixes above. Four are corrected in revision `694bc608c`, each with table rows and a patch in `tests/mutants/` that puts the problem back.
+
+| # | Problem | Correction | Limit |
+|---|---|---|---|
+| 10 | A request waiting on `proxy_cache_lock` checked again only every 500 ms, so collapsing failed at shorter lifetimes | On a location with `proxy_cache_fine_time` the first check is after 5 ms and the interval doubles to 500 ms. Other locations are unchanged | Still polling, not a wake-up. A lifetime shorter than the fetch is not collapsed: each waiter finds the entry expired and fetches |
+| 11 | A 304 retired the fine entry, so the next request fetched it in full | The entry is updated in place when the stored header block keeps its length: identical fields, or a `Date` or `Cache-Control` of the same length | Any other change still retires the entry. The update is two writes, header block then times, not one atomic write; a reader between them sees the old, expired times |
+| 12 | Each fallback wrote one `info` line | One line per reason per second per worker, with the number left out. `$upstream_cache_fine_status` still reports every fallback | The count is per worker |
+| 13 | Two locations share a cache zone, one with `proxy_cache_fine_time` and one without; each overwrites the other's file version for a shared key | `nginx -t` warns | A warning, not an error, because the keys may not overlap. A zone named by a variable is not checked |
+
+Not corrected:
+
+| Problem | Effect | What to do meanwhile |
+|---|---|---|
+| A restart, clock step or suspend refuses every fine entry in the zone at once | Each key is fetched again in full, together. Stale windows are not used for a refused entry | `proxy_cache_lock on` limits this to one fetch per key. Size the origin for one fetch of every hot key at once |
+| `proxy_cache_fine_time` is turned off after use | Every v6 entry becomes unreadable and is fetched again | Expect one refill of the zone |
+| A downstream cache is set to `trusted` before its upstream has `proxy_cache_fine_age_header on` | The downstream cache gets no `Age-Ms` and applies the base: a longer lifetime, or with a base of zero an origin request per request | Turn the header on upstream first; remove `trusted` downstream first |
+| `proxy_cache_fine_age_header on` applies to every client of the location | Browsers see millisecond cache-fill timing | `proxy_hide_header Age-Ms` at edge locations |
+| The unit tests fix the clock through `ngx_http_cache_fine_fixed_clock`, a variable compiled into the binary | Test code in a production path | None; it is never set outside the tests |
+
 Fine entries use v6 cache files on 64-bit time_t builds. The binary reads v5;
 older binaries reject v6 and refill. A 304 merges metadata and serves the
-validated body, then the next request refills. These are implementation
+validated body; the entry is then updated in place or retired, as in the
+table above. These are implementation
 choices, not wire requirements. The benchmark uses full playlist refreshes,
 so its results do not establish the cost of repeated conditional validation.
 

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Show that the tests catch each mistake listed in the draft's
-# "Implementation Pitfalls".
+# "Implementation Pitfalls": pitfalls 1 to 9, and problems 10 to 13 found
+# in a later review.
 #
 # The suites must pass on the tree as it is.  Then each patch in mutants/
 # puts one mistake back into a scratch copy, and at least one test row has
@@ -85,8 +86,10 @@ suites "$work/fixed" "$work/fixed"
 grep -h -E '^(deadlines|clock): ' "$work/fixed.unit" || true
 grep -h -E '^(Files=|Result:)' "$work/fixed.unit" "$work/fixed.integration" || true
 rows=$(failed_rows "$work/fixed")
+# A suite that stops early has no failed row, so its result is checked too.
 if [ -n "$rows" ] || ! grep -q '^deadlines: ' "$work/fixed.unit" \
-    || ! grep -q '^clock: ' "$work/fixed.unit"
+    || ! grep -q '^clock: ' "$work/fixed.unit" \
+    || grep -q '^Result: FAIL' "$work/fixed.unit" "$work/fixed.integration"
 then
     echo "FAILED on the fixed tree:" >&2
     echo "$rows" >&2
@@ -176,14 +179,14 @@ done
 echo
 echo "== Tagged rows per pitfall =="
 echo "pitfall | positive | negative | boundary | corner"
-files="$root/$tests/headers.t $root/$tests/deadlines.c $root/$tests/clock.c $root/$tests/monotonic.t"
+files="$root/$tests/headers.t $root/$tests/deadlines.c $root/$tests/clock.c $root/$tests/monotonic.t $root/$tests/zones.t"
 if [ "$integration" = 1 ]; then
-    files="$files $harness/proxy_cache_fine_exposure.t $harness/proxy_cache_fine_resolution.t"
+    files="$files $harness/proxy_cache_fine_exposure.t $harness/proxy_cache_fine_resolution.t $harness/proxy_cache_fine_lock.t $harness/proxy_cache_fine_validate.t"
 fi
 # shellcheck disable=SC2086
-grep -o -h -E '[1-9]:(positive|negative|boundary|corner)' $files \
+grep -o -h -E '[0-9]+:(positive|negative|boundary|corner)' $files \
     | awk -F: '{ n[$1 " " $2]++ }
-        END { for (p = 1; p <= 9; p++)
+        END { for (p = 1; p <= 13; p++)
                 printf "%d | %d | %d | %d | %d\n", p, n[p " positive"],
                     n[p " negative"], n[p " boundary"], n[p " corner"] }'
 

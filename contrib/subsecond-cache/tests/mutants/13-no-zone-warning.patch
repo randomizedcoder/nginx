@@ -1,0 +1,12 @@
+Problem 13: no warning for a zone used with and without fine time.
+--- a/src/http/modules/ngx_http_proxy_module.c
++++ b/src/http/modules/ngx_http_proxy_module.c
+@@ -4181,7 +4181,7 @@
+ 
+         cache = conf->upstream.cache_zone->data;
+ 
+-        if (ngx_http_cache_fine_zone_mixed(&cache->fine,
++        if (0 && ngx_http_cache_fine_zone_mixed(&cache->fine,
+                                            conf->upstream.cache_fine_time))
+         {
+             ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
