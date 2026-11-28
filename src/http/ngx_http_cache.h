@@ -28,26 +28,67 @@ void ngx_http_cache_fine_update(ngx_http_request_t *r, ngx_int_t rc);
 ngx_uint_t ngx_http_cache_fine_refused(ngx_http_request_t *r, int64_t now);
 int64_t ngx_http_cache_now_ms(void);
 void ngx_http_cache_fine_refuse(ngx_http_request_t *r, ngx_uint_t status);
+#if (NGX_HTTP_CACHE_FINE_TEST)
 extern ngx_uint_t  ngx_http_cache_fine_fixed_clock;
+#endif
 int64_t ngx_http_cache_fine_offset(void);
 
 /*
  * The wall clock less the monotonic clock is constant unless the wall clock
- * steps or the host is suspended. A fine entry is reusable only while that
- * offset is within this many milliseconds of its value when stored.
+ * steps or the host is suspended or rebooted.  It is the same after this
+ * server is restarted.  A fine entry is reusable only while that offset is
+ * within this many milliseconds of its value when stored.
+ *
+ * The cache file keeps the low 32 bits of the offset, which fit in the
+ * padding at the end of its header, and the comparison is modulo 2^32
+ * milliseconds, 49.7 days.
  */
 #define NGX_HTTP_CACHE_FINE_STEP     10
-#define NGX_HTTP_CACHE_FINE_NONE     INT64_MIN
 
 static ngx_inline ngx_uint_t
-ngx_http_cache_fine_continuous(int64_t stored, int64_t current)
+ngx_http_cache_fine_continuous(uint32_t stored, int64_t current)
 {
-    if (stored == NGX_HTTP_CACHE_FINE_NONE) {
+    uint32_t  ahead, behind;
+
+    ahead = (uint32_t) current - stored;
+    behind = stored - (uint32_t) current;
+
+    return ahead <= NGX_HTTP_CACHE_FINE_STEP
+           || behind <= NGX_HTTP_CACHE_FINE_STEP;
+}
+
+
+/*
+ * proxy_cache_fine_age_header may be a variable, so that Age-Ms goes only
+ * to chosen recipients.  An empty value, "0" and "off" mean no.
+ */
+static ngx_inline ngx_uint_t
+ngx_http_cache_fine_enabled(u_char *value, size_t len)
+{
+    if (len == 0 || (len == 1 && value[0] == '0')) {
         return 0;
     }
 
-    return stored > current ? stored - current <= NGX_HTTP_CACHE_FINE_STEP
-                            : current - stored <= NGX_HTTP_CACHE_FINE_STEP;
+    if (len == 3 && (value[0] == 'o' || value[0] == 'O')
+        && (value[1] == 'f' || value[1] == 'F')
+        && (value[2] == 'f' || value[2] == 'F'))
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+
+/*
+ * The whole-second expiry of an entry with a millisecond deadline, for a
+ * location without fine time.  nginx treats an entry as fresh to the end
+ * of the second valid_sec.
+ */
+static ngx_inline time_t
+ngx_http_cache_fine_whole(int64_t deadline)
+{
+    return (time_t) (deadline / 1000) - 1;
 }
 
 
@@ -215,7 +256,6 @@ typedef struct {
     size_t                           body_start;
     off_t                            fs_size;
     ngx_msec_t                       lock_time;
-    int64_t                          fine_offset;
 } ngx_http_file_cache_node_t;
 
 
@@ -238,6 +278,7 @@ struct ngx_http_cache_s {
     int64_t                          fine_window;
     int64_t                          fine_error;
     int64_t                          fine_offset;
+    uint32_t                         fine_stored;
     ngx_uint_t                       fine_status;
     ngx_uint_t                       fine_clock;
     ngx_uint_t                       fine_inplace;
@@ -273,9 +314,12 @@ struct ngx_http_cache_s {
     ngx_msec_t                       lock_wait;
 
     ngx_event_t                      wait_event;
+    ngx_queue_t                      wait_queue;
 
     unsigned                         lock:1;
     unsigned                         waiting:1;
+    unsigned                         wait_queued:1;
+    unsigned                         woken:1;
 
     unsigned                         updated:1;
     unsigned                         updating:1;
@@ -308,7 +352,30 @@ typedef struct {
     u_char                           vary_len;
     u_char                           vary[NGX_HTTP_CACHE_VARY_LEN];
     u_char                           variant[NGX_HTTP_CACHE_KEY_LEN];
+    uint32_t                         fine_offset;
 } ngx_http_file_cache_header_t;
+
+
+/*
+ * fine_offset takes the place of padding.  The header has to keep its
+ * size, because a version 5 file has the same layout.
+ */
+typedef char  ngx_http_file_cache_header_size_check
+    [sizeof(time_t) < 8 || sizeof(ngx_http_file_cache_header_t) == 336
+     ? 1 : -1];
+
+
+/* The times of a version 6 header, as written after a 304. */
+static ngx_inline void
+ngx_http_cache_fine_stamp(ngx_http_file_cache_header_t *h, int64_t birth,
+    int64_t deadline, int64_t window, int64_t error, int64_t offset)
+{
+    h->date = (time_t) birth;
+    h->valid_sec = (time_t) deadline;
+    h->updating_sec = (time_t) window;
+    h->error_sec = (time_t) error;
+    h->fine_offset = (uint32_t) offset;
+}
 
 
 typedef struct {

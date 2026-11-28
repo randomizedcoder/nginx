@@ -14,6 +14,8 @@
 static ngx_int_t ngx_http_file_cache_lock(ngx_http_request_t *r,
     ngx_http_cache_t *c);
 static void ngx_http_file_cache_lock_wait_handler(ngx_event_t *ev);
+static void ngx_http_file_cache_wake(ngx_http_file_cache_node_t *fcn);
+static void ngx_http_file_cache_unqueue(ngx_http_cache_t *c);
 static ngx_int_t ngx_http_file_cache_lock_wait(ngx_http_request_t *r,
     ngx_http_cache_t *c);
 static ngx_int_t ngx_http_file_cache_read(ngx_http_request_t *r,
@@ -77,6 +79,10 @@ ngx_str_t  ngx_http_cache_status[] = {
 
 
 static u_char  ngx_http_file_cache_key[] = { LF, 'K', 'E', 'Y', ':', ' ' };
+
+
+/* Requests in this worker process that wait on a cache lock. */
+static ngx_queue_t  ngx_http_file_cache_waiters;
 
 
 static ngx_int_t
@@ -454,6 +460,20 @@ ngx_http_file_cache_lock(ngx_http_request_t *r, ngx_http_cache_t *c)
         c->wait_event.log = r->connection->log;
     }
 
+    /*
+     * With fine time, a fetch that ends in this worker process wakes its
+     * waiters at once.  The timer remains for a fetch in another worker.
+     */
+
+    if (!c->wait_queued && r->upstream->conf->cache_fine_time) {
+        if (ngx_http_file_cache_waiters.next == NULL) {
+            ngx_queue_init(&ngx_http_file_cache_waiters);
+        }
+
+        ngx_queue_insert_tail(&ngx_http_file_cache_waiters, &c->wait_queue);
+        c->wait_queued = 1;
+    }
+
     timer = c->wait_time - now;
 
     ngx_add_timer(&c->wait_event,
@@ -462,6 +482,51 @@ ngx_http_file_cache_lock(ngx_http_request_t *r, ngx_http_cache_t *c)
     r->main->blocked++;
 
     return NGX_AGAIN;
+}
+
+
+/* Wake the requests in this worker process that wait for a fetch. */
+static void
+ngx_http_file_cache_wake(ngx_http_file_cache_node_t *fcn)
+{
+    ngx_queue_t       *q;
+    ngx_http_cache_t  *c;
+
+    if (ngx_http_file_cache_waiters.next == NULL) {
+        return;
+    }
+
+    for (q = ngx_queue_head(&ngx_http_file_cache_waiters);
+         q != ngx_queue_sentinel(&ngx_http_file_cache_waiters);
+         q = ngx_queue_next(q))
+    {
+        c = ngx_queue_data(q, ngx_http_cache_t, wait_queue);
+
+        if (c->node != fcn || !c->wait_event.timer_set) {
+            continue;
+        }
+
+        /*
+         * The fetch this request waited for has ended.  It looks at the
+         * cache again even if another woken request has since begun to
+         * update the entry, so that a stale entry can be served to it.
+         */
+
+        c->woken = 1;
+
+        ngx_del_timer(&c->wait_event);
+        ngx_post_event(&c->wait_event, &ngx_posted_events);
+    }
+}
+
+
+static void
+ngx_http_file_cache_unqueue(ngx_http_cache_t *c)
+{
+    if (c->wait_queued) {
+        ngx_queue_remove(&c->wait_queue);
+        c->wait_queued = 0;
+    }
 }
 
 
@@ -485,6 +550,8 @@ ngx_http_file_cache_lock_wait_handler(ngx_event_t *ev)
     if (rc == NGX_AGAIN) {
         return;
     }
+
+    ngx_http_file_cache_unqueue(r->cache);
 
     r->cache->waiting = 0;
     r->main->blocked--;
@@ -519,6 +586,11 @@ ngx_http_file_cache_lock_wait(ngx_http_request_t *r, ngx_http_cache_t *c)
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "cache lock timeout");
         c->lock_timeout = 0;
+        return NGX_OK;
+    }
+
+    if (c->woken) {
+        c->woken = 0;
         return NGX_OK;
     }
 
@@ -572,8 +644,8 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
     h = (ngx_http_file_cache_header_t *) c->buf->pos;
 
     if (h->version != NGX_HTTP_CACHE_VERSION
-        && !(h->version == NGX_HTTP_CACHE_FINE_VERSION
-             && r->upstream->conf->cache_fine_time && sizeof(time_t) >= 8)) {
+        && !(h->version == NGX_HTTP_CACHE_FINE_VERSION && sizeof(time_t) >= 8))
+    {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "cache file \"%s\" version mismatch", c->file.name.data);
         return NGX_DECLINED;
@@ -634,14 +706,26 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
     c->valid_msec = h->valid_msec;
     if (h->version == NGX_HTTP_CACHE_FINE_VERSION) {
         /* Version 6 stores date, expiry and stale windows in milliseconds. */
-        c->fine_birth = h->date;
-        c->fine_deadline = h->valid_sec;
-        c->fine_window = h->updating_sec;
-        c->fine_error = h->error_sec;
         c->error_sec /= 1000;
         c->date /= 1000;
         c->valid_sec /= 1000;
         c->updating_sec /= 1000;
+
+        if (r->upstream->conf->cache_fine_time) {
+            c->fine_birth = h->date;
+            c->fine_deadline = h->valid_sec;
+            c->fine_window = h->updating_sec;
+            c->fine_error = h->error_sec;
+            c->fine_stored = h->fine_offset;
+
+        } else {
+            /*
+             * Without fine time the entry is used in whole seconds.  An
+             * entry is fresh to the end of the second valid_sec, so the
+             * second before the deadline's is the last that ends in time.
+             */
+            c->valid_sec = ngx_http_cache_fine_whole(h->valid_sec);
+        }
     }
 
     c->body_start = h->body_start;
@@ -679,13 +763,15 @@ ngx_http_file_cache_read(ngx_http_request_t *r, ngx_http_cache_t *c)
         rc = ngx_http_cache_fine_status(msec, c->fine_deadline, c->fine_window);
 
         /*
-         * After a restart, a clock step or a suspend the elapsed time is
-         * uncertain, so the entry is neither fresh nor served stale.
+         * After a clock step, a suspend or a reboot the elapsed time is
+         * uncertain, so the entry is neither fresh nor served stale.  The
+         * offset is kept in the file, so a restart of this server alone
+         * does not lose it.
          */
         refused = 0;
 
         if (msec < c->fine_birth
-            || !ngx_http_cache_fine_continuous(c->node->fine_offset,
+            || !ngx_http_cache_fine_continuous(c->fine_stored,
                                                ngx_http_cache_fine_offset()))
         {
             ngx_http_cache_fine_refuse(r, NGX_HTTP_CACHE_FINE_CLOCK);
@@ -1025,7 +1111,6 @@ renew:
     fcn->error = 0;
     fcn->exists = 0;
     fcn->valid_sec = 0;
-    fcn->fine_offset = NGX_HTTP_CACHE_FINE_NONE;
     fcn->uniq = 0;
     fcn->body_start = 0;
     fcn->fs_size = 0;
@@ -1382,10 +1467,9 @@ ngx_http_file_cache_set_header(ngx_http_request_t *r, u_char *buf)
     h->date = c->date;
     if (c->fine_deadline) {
         h->version = NGX_HTTP_CACHE_FINE_VERSION;
-        h->date = c->fine_birth;
-        h->valid_sec = c->fine_deadline;
-        h->updating_sec = c->fine_window;
-        h->error_sec = c->fine_error;
+        ngx_http_cache_fine_stamp(h, c->fine_birth, c->fine_deadline,
+                                  c->fine_window, c->fine_error,
+                                  c->fine_offset);
     }
     h->crc32 = c->crc32;
     h->valid_msec = (u_short) c->valid_msec;
@@ -1432,7 +1516,8 @@ ngx_http_file_cache_set_header(ngx_http_request_t *r, u_char *buf)
 static ngx_int_t
 ngx_http_file_cache_update_variant(ngx_http_request_t *r, ngx_http_cache_t *c)
 {
-    ngx_http_file_cache_t  *cache;
+    ngx_http_file_cache_t       *cache;
+    ngx_http_file_cache_node_t  *fcn;
 
     if (!c->secondary) {
         return NGX_OK;
@@ -1456,11 +1541,15 @@ ngx_http_file_cache_update_variant(ngx_http_request_t *r, ngx_http_cache_t *c)
 
     ngx_shmtx_lock(&cache->shpool->mutex);
 
+    fcn = c->node;
+
     c->node->count--;
     c->node->updating = 0;
     c->node = NULL;
 
     ngx_shmtx_unlock(&cache->shpool->mutex);
+
+    ngx_http_file_cache_wake(fcn);
 
     c->file.name.len = 0;
     c->update_variant = 1;
@@ -1540,8 +1629,6 @@ ngx_http_file_cache_update(ngx_http_request_t *r, ngx_temp_file_t *tf)
     c->node->error = 0;
     c->node->uniq = uniq;
     c->node->body_start = c->body_start;
-    c->node->fine_offset = c->fine_deadline ? c->fine_offset
-                                            : NGX_HTTP_CACHE_FINE_NONE;
 
     cache->sh->size += fs_size - c->node->fs_size;
     c->node->fs_size = fs_size;
@@ -1553,6 +1640,8 @@ ngx_http_file_cache_update(ngx_http_request_t *r, ngx_temp_file_t *tf)
     c->node->updating = 0;
 
     ngx_shmtx_unlock(&cache->shpool->mutex);
+
+    ngx_http_file_cache_wake(c->node);
 }
 
 
@@ -1636,8 +1725,9 @@ ngx_http_file_cache_update_header(ngx_http_request_t *r)
          *
          * Where the 304 changed nothing stored, or only values of the
          * same length, the header block has been patched in memory: write
-         * it back with the new times.  A reader between the two writes
-         * sees the old, expired times and validates again.
+         * it back with the new times, as one write from the start of the
+         * file.  No length changes, so a reader that sees part of the
+         * write still finds a well-formed entry.
          *
          * Otherwise the header block would change length.  Retire the
          * entry, so that the next request refills it.
@@ -1647,20 +1737,15 @@ ngx_http_file_cache_update_header(ngx_http_request_t *r)
             && (size_t) h.body_start == c->body_start
             && (size_t) (c->buf->last - c->buf->pos) >= c->body_start)
         {
-            (void) ngx_write_file(&file, c->buf->pos + c->header_start,
-                                  c->body_start - c->header_start,
-                                  c->header_start);
+            ngx_http_cache_fine_stamp(
+                                 (ngx_http_file_cache_header_t *) c->buf->pos,
+                                 c->fine_birth, c->fine_deadline,
+                                 c->fine_window, c->fine_error,
+                                 c->fine_offset);
 
-            h.date = c->fine_birth;
-            h.valid_sec = c->fine_deadline;
-            h.updating_sec = c->fine_window;
-            h.error_sec = c->fine_error;
-
-            (void) ngx_write_file(&file, (u_char *) &h,
-                                  sizeof(ngx_http_file_cache_header_t), 0);
+            (void) ngx_write_file(&file, c->buf->pos, c->body_start, 0);
 
             ngx_shmtx_lock(&c->file_cache->shpool->mutex);
-            c->node->fine_offset = c->fine_offset;
             c->node->valid_sec = c->valid_sec;
             c->node->valid_msec = c->valid_msec;
             ngx_shmtx_unlock(&c->file_cache->shpool->mutex);
@@ -1674,7 +1759,14 @@ ngx_http_file_cache_update_header(ngx_http_request_t *r)
         goto done;
     }
 
-    if (h.version != NGX_HTTP_CACHE_VERSION
+    /*
+     * A version 6 file read without fine time is rewritten below as
+     * version 5.  Its header block is not changed by a 304 here.
+     */
+
+    if ((h.version != NGX_HTTP_CACHE_VERSION
+         && !(h.version == NGX_HTTP_CACHE_FINE_VERSION
+              && r->upstream->fine_validation == NULL))
         || h.last_modified != c->last_modified
         || h.crc32 != c->crc32
         || (size_t) h.header_start != c->header_start
@@ -1787,6 +1879,7 @@ ngx_http_cache_send(ngx_http_request_t *r)
 void
 ngx_http_file_cache_free(ngx_http_cache_t *c, ngx_temp_file_t *tf)
 {
+    ngx_uint_t                   released;
     ngx_http_file_cache_t       *cache;
     ngx_http_file_cache_node_t  *fcn;
 
@@ -1804,8 +1897,11 @@ ngx_http_file_cache_free(ngx_http_cache_t *c, ngx_temp_file_t *tf)
     fcn = c->node;
     fcn->count--;
 
+    released = 0;
+
     if (c->updating && fcn->lock_time == c->lock_time) {
         fcn->updating = 0;
+        released = 1;
     }
 
     if (c->error) {
@@ -1822,9 +1918,14 @@ ngx_http_file_cache_free(ngx_http_cache_t *c, ngx_temp_file_t *tf)
         ngx_slab_free_locked(cache->shpool, fcn);
         cache->sh->count--;
         c->node = NULL;
+        released = 0;
     }
 
     ngx_shmtx_unlock(&cache->shpool->mutex);
+
+    if (released) {
+        ngx_http_file_cache_wake(fcn);
+    }
 
     c->updated = 1;
     c->updating = 0;
@@ -1846,6 +1947,12 @@ ngx_http_file_cache_free(ngx_http_cache_t *c, ngx_temp_file_t *tf)
     if (c->wait_event.timer_set) {
         ngx_del_timer(&c->wait_event);
     }
+
+    if (c->wait_event.posted) {
+        ngx_delete_posted_event(&c->wait_event);
+    }
+
+    ngx_http_file_cache_unqueue(c);
 }
 
 
@@ -2420,8 +2527,7 @@ ngx_http_file_cache_add(ngx_http_file_cache_t *cache, ngx_http_cache_t *c)
         fcn->uses = 1;
         fcn->exists = 1;
         fcn->fs_size = c->fs_size;
-        fcn->fine_offset = NGX_HTTP_CACHE_FINE_NONE;
-
+    
         cache->sh->size += c->fs_size;
 
     } else {

@@ -29,8 +29,10 @@ static ngx_str_t  request_directives[] = {
 };
 
 
-/* Unit tests set this to supply a fixed clock. */
+#if (NGX_HTTP_CACHE_FINE_TEST)
+/* Unit tests set this to supply a fixed clock.  Not in a normal build. */
 ngx_uint_t  ngx_http_cache_fine_fixed_clock;
+#endif
 
 
 /*
@@ -44,9 +46,13 @@ ngx_http_cache_now_ms(void)
 {
     ngx_time_t  *tp;
 
+#if (NGX_HTTP_CACHE_FINE_TEST)
     if (!ngx_http_cache_fine_fixed_clock) {
         ngx_time_update();
     }
+#else
+    ngx_time_update();
+#endif
 
     tp = ngx_timeofday();
     return (int64_t) tp->sec * 1000 + tp->msec;
@@ -750,6 +756,21 @@ ngx_http_cache_fine_headers(ngx_http_request_t *r)
 
     if (!u->conf->cache_fine_age_header) {
         return NGX_OK;
+    }
+
+    if (u->conf->cache_fine_age_header_value) {
+        ngx_str_t  wanted;
+
+        if (ngx_http_complex_value(r, u->conf->cache_fine_age_header_value,
+                                   &wanted)
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+
+        if (!ngx_http_cache_fine_enabled(wanted.data, wanted.len)) {
+            return NGX_OK;
+        }
     }
 
     return ngx_http_fine_add(r, fine, age);

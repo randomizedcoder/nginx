@@ -124,6 +124,8 @@ static char *ngx_http_proxy_store(ngx_conf_t *cf, ngx_command_t *cmd,
 #if (NGX_HTTP_CACHE)
 static char *ngx_http_proxy_cache(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_http_proxy_cache_fine_age_header(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static char *ngx_http_proxy_cache_key(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 #endif
@@ -549,10 +551,10 @@ static ngx_command_t  ngx_http_proxy_commands[] = {
       NULL },
 
     { ngx_string("proxy_cache_fine_age_header"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
-      ngx_conf_set_flag_slot,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_proxy_cache_fine_age_header,
       NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_proxy_loc_conf_t, upstream.cache_fine_age_header),
+      0,
       NULL },
 
     { ngx_string("proxy_cache_revalidate"),
@@ -3649,6 +3651,7 @@ ngx_http_proxy_create_loc_conf(ngx_conf_t *cf)
     conf->upstream.cache_fine_time = NGX_CONF_UNSET_UINT;
     conf->upstream.cache_fine_request = NGX_CONF_UNSET;
     conf->upstream.cache_fine_age_header = NGX_CONF_UNSET;
+    conf->upstream.cache_fine_age_header_value = NGX_CONF_UNSET_PTR;
     conf->upstream.cache_revalidate = NGX_CONF_UNSET;
     conf->upstream.cache_convert_head = NGX_CONF_UNSET;
     conf->upstream.cache_background_update = NGX_CONF_UNSET;
@@ -3977,6 +3980,9 @@ ngx_http_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                               prev->upstream.cache_fine_request, 0);
     ngx_conf_merge_value(conf->upstream.cache_fine_age_header,
                               prev->upstream.cache_fine_age_header, 0);
+    ngx_conf_merge_ptr_value(conf->upstream.cache_fine_age_header_value,
+                              prev->upstream.cache_fine_age_header_value,
+                              NULL);
 
     if (conf->upstream.cache_fine_time) {
         const char  *missing;
@@ -5177,6 +5183,65 @@ ngx_http_proxy_cache(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     if (plcf->upstream.cache_zone == NULL) {
         return NGX_CONF_ERROR;
     }
+
+    return NGX_CONF_OK;
+}
+
+
+/* "on", "off", or a variable evaluated for each request. */
+static char *
+ngx_http_proxy_cache_fine_age_header(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf)
+{
+    ngx_http_proxy_loc_conf_t *plcf = conf;
+
+    ngx_str_t                         *value;
+    ngx_http_complex_value_t          *cv;
+    ngx_http_compile_complex_value_t   ccv;
+
+    if (plcf->upstream.cache_fine_age_header != NGX_CONF_UNSET) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    if (ngx_strcasecmp(value[1].data, (u_char *) "on") == 0) {
+        plcf->upstream.cache_fine_age_header = 1;
+        plcf->upstream.cache_fine_age_header_value = NULL;
+        return NGX_CONF_OK;
+    }
+
+    if (ngx_strcasecmp(value[1].data, (u_char *) "off") == 0) {
+        plcf->upstream.cache_fine_age_header = 0;
+        plcf->upstream.cache_fine_age_header_value = NULL;
+        return NGX_CONF_OK;
+    }
+
+    if (ngx_http_script_variables_count(&value[1]) == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid value \"%V\" in \"%V\" directive, "
+                           "it must be \"on\", \"off\" or a variable",
+                           &value[1], &cmd->name);
+        return NGX_CONF_ERROR;
+    }
+
+    cv = ngx_palloc(cf->pool, sizeof(ngx_http_complex_value_t));
+    if (cv == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
+
+    ccv.cf = cf;
+    ccv.value = &value[1];
+    ccv.complex_value = cv;
+
+    if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+
+    plcf->upstream.cache_fine_age_header = 1;
+    plcf->upstream.cache_fine_age_header_value = cv;
 
     return NGX_CONF_OK;
 }
