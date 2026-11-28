@@ -47,7 +47,8 @@ main(void)
 
     struct {
         const char  *description;
-        int64_t      stored, current;
+        uint32_t     stored;
+        int64_t      current;
         ngx_uint_t   expected;
     } clock[] = {
         { "unchanged offset", 5000, 5000, 1 },
@@ -57,10 +58,26 @@ main(void)
         { "step backwards past the limit", 5000, 4989, 0 },
         { "one second back", 5000, 4000, 0 },
         { "suspend for a minute", 5000, 65000, 0 },
-        { "no offset recorded, after a restart", NGX_HTTP_CACHE_FINE_NONE,
-          5000, 0 },
+        { "16:negative file written before the offset was stored", 0,
+          1700000000000, 0 },
         { "zero offset without a monotonic clock", 0, 0, 1 },
-        { "negative offsets", -5000, -5004, 1 }
+        { "16:positive offset wider than 32 bits, unchanged",
+          (uint32_t) 1700000000000, 1700000000000, 1 },
+        { "16:negative offset wider than 32 bits, 11 ms on",
+          (uint32_t) 1700000000000, 1700000000011, 0 },
+        { "16:boundary offset wider than 32 bits, 10 ms on",
+          (uint32_t) 1700000000000, 1700000000010, 1 },
+        { "16:boundary jitter across the 32-bit wrap, forwards", 0xfffffffb,
+          0x100000005, 1 },
+        { "16:boundary jitter across the 32-bit wrap, backwards", 5,
+          0xfffffffc, 1 },
+        { "16:boundary step across the 32-bit wrap", 0xfffffffb,
+          0x100000006, 0 },
+        { "16:corner negative offset, unchanged", (uint32_t) -5000, -5000,
+          1 },
+        { "16:corner negative offset, jitter", (uint32_t) -5000, -5004, 1 },
+        { "16:corner a step of exactly 2^32 ms is not seen", 5000,
+          0x100000000 + 5000, 1 }
     };
 
     /*
@@ -87,6 +104,28 @@ main(void)
         { "no monotonic clock with a wide time_t", "4:corner", 0, 16,
           "a monotonic clock" },
         { "zero-width time_t", "5:corner", 1, 0, "a 64-bit time_t" }
+    };
+
+    /*
+     * Problem 15: after a 304 the times of a stored entry are set in the
+     * header that is written back, and nothing else in it changes.
+     * expected is the offset kept in the file, the low 32 bits.
+     */
+    struct {
+        const char  *description;
+        int64_t      birth, deadline, window, error, offset;
+        uint32_t     expected;
+    } stamp[] = {
+        { "15:positive times and offset are set", 1700000000123,
+          1700000000323, 500, 2000, 5000, 5000 },
+        { "15:negative zero windows are written as zero", 1700000000123,
+          1700000000323, 0, 0, 5000, 5000 },
+        { "15:boundary offset of 2^32 - 1 is kept whole", 1, 2, 3, 4,
+          0xffffffff, 0xffffffff },
+        { "15:boundary offset of 2^32 keeps its low bits", 1, 2, 3, 4,
+          0x100000000, 0 },
+        { "15:corner negative offset keeps its low bits", 1, 2, 3, 4, -1,
+          0xffffffff }
     };
 
     /*
@@ -165,6 +204,97 @@ main(void)
     };
 
     failed = 0;
+
+    /*
+     * Problem 17: a location without fine time uses a millisecond deadline
+     * in whole seconds.  nginx serves an entry to the end of the second
+     * valid_sec, so the row holds when (expected + 1) * 1000 <= deadline.
+     */
+    struct {
+        const char  *description;
+        int64_t      deadline;
+        time_t       expected;
+    } whole[] = {
+        { "17:positive deadline in the middle of a second", 60500, 59 },
+        { "17:negative one second earlier would lose a usable second",
+          61500, 60 },
+        { "17:boundary deadline on a second", 60000, 59 },
+        { "17:boundary one millisecond before a second", 59999, 58 },
+        { "17:boundary one millisecond after a second", 60001, 59 },
+        { "17:corner deadline within the first second", 200, -1 }
+    };
+
+    /*
+     * Problem 18: proxy_cache_fine_age_header may be a variable.  expected
+     * is whether its value for a request sends Age-Ms.
+     */
+    struct {
+        const char  *description;
+        const char  *value;
+        ngx_uint_t   expected;
+    } enabled[] = {
+        { "18:positive 1", "1", 1 },
+        { "18:positive on", "on", 1 },
+        { "18:negative empty", "", 0 },
+        { "18:negative 0", "0", 0 },
+        { "18:negative off", "off", 0 },
+        { "18:boundary OFF in capitals", "OFF", 0 },
+        { "18:boundary 00 is not 0", "00", 1 },
+        { "18:boundary of is not off", "of", 1 },
+        { "18:corner a space", " ", 1 },
+        { "18:corner offline is not off", "offline", 1 }
+    };
+
+    for (i = 0; i < sizeof(enabled) / sizeof(enabled[0]); i++) {
+        if (ngx_http_cache_fine_enabled((u_char *) enabled[i].value,
+                                        strlen(enabled[i].value))
+            != enabled[i].expected)
+        {
+            fprintf(stderr, "enabled: %s failed\n", enabled[i].description);
+            failed++;
+        }
+    }
+
+    for (i = 0; i < sizeof(whole) / sizeof(whole[0]); i++) {
+        time_t  valid;
+
+        valid = ngx_http_cache_fine_whole(whole[i].deadline);
+
+        if (valid != whole[i].expected
+            || ((int64_t) valid + 1) * 1000 > whole[i].deadline)
+        {
+            fprintf(stderr, "whole: %s failed\n", whole[i].description);
+            failed++;
+        }
+    }
+
+    for (i = 0; i < sizeof(stamp) / sizeof(stamp[0]); i++) {
+        ngx_http_file_cache_header_t  h, before;
+
+        memset(&h, 0x5a, sizeof(h));
+        before = h;
+
+        ngx_http_cache_fine_stamp(&h, stamp[i].birth, stamp[i].deadline,
+                                  stamp[i].window, stamp[i].error,
+                                  stamp[i].offset);
+
+        if (h.date != stamp[i].birth || h.valid_sec != stamp[i].deadline
+            || h.updating_sec != stamp[i].window
+            || h.error_sec != stamp[i].error
+            || h.fine_offset != stamp[i].expected
+            || h.version != before.version
+            || h.last_modified != before.last_modified
+            || h.crc32 != before.crc32
+            || h.header_start != before.header_start
+            || h.body_start != before.body_start
+            || memcmp(h.etag, before.etag, sizeof(h.etag)) != 0
+            || memcmp(h.vary, before.vary, sizeof(h.vary)) != 0
+            || memcmp(h.variant, before.variant, sizeof(h.variant)) != 0)
+        {
+            fprintf(stderr, "stamp: %s failed\n", stamp[i].description);
+            failed++;
+        }
+    }
 
     for (i = 0; i < sizeof(lock) / sizeof(lock[0]); i++) {
         ngx_msec_t  wait, timer;
@@ -255,6 +385,9 @@ main(void)
     printf("deadlines: %d rows, %d failures\n",
            (int) (sizeof(support) / sizeof(support[0])
                   + sizeof(lock) / sizeof(lock[0])
+                  + sizeof(stamp) / sizeof(stamp[0])
+                  + sizeof(whole) / sizeof(whole[0])
+                  + sizeof(enabled) / sizeof(enabled[0])
                   + sizeof(logged) / sizeof(logged[0])
                   + sizeof(zone) / sizeof(zone[0])
                   + sizeof(clock) / sizeof(clock[0])

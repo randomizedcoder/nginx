@@ -1,0 +1,12 @@
+Problem 16: the clock offset is not kept in the cache file, so a restart refuses every fine entry.
+--- a/src/http/ngx_http_cache.h
++++ b/src/http/ngx_http_cache.h
+@@ -374,7 +374,7 @@
+     h->valid_sec = (time_t) deadline;
+     h->updating_sec = (time_t) window;
+     h->error_sec = (time_t) error;
+-    h->fine_offset = (uint32_t) offset;
++    h->fine_offset = 0;
+ }
+ 
+ 

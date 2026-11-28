@@ -1,7 +1,7 @@
 #!/bin/sh
 # Show that the tests catch each mistake listed in the draft's
-# "Implementation Pitfalls": pitfalls 1 to 9, and problems 10 to 13 found
-# in a later review.
+# "Implementation Pitfalls": pitfalls 1 to 9, and problems 10 to 19 found
+# in later review.
 #
 # The suites must pass on the tree as it is.  Then each patch in mutants/
 # puts one mistake back into a scratch copy, and at least one test row has
@@ -179,14 +179,14 @@ done
 echo
 echo "== Tagged rows per pitfall =="
 echo "pitfall | positive | negative | boundary | corner"
-files="$root/$tests/headers.t $root/$tests/deadlines.c $root/$tests/clock.c $root/$tests/monotonic.t $root/$tests/zones.t"
+files="$root/$tests/headers.t $root/$tests/deadlines.c $root/$tests/clock.c $root/$tests/monotonic.t $root/$tests/zones.t $root/$tests/symbols.t $root/$tests/agevalue.t"
 if [ "$integration" = 1 ]; then
-    files="$files $harness/proxy_cache_fine_exposure.t $harness/proxy_cache_fine_resolution.t $harness/proxy_cache_fine_lock.t $harness/proxy_cache_fine_validate.t"
+    files="$files $harness/proxy_cache_fine_exposure.t $harness/proxy_cache_fine_resolution.t $harness/proxy_cache_fine_lock.t $harness/proxy_cache_fine_lock_workers.t $harness/proxy_cache_fine_validate.t $harness/proxy_cache_fine_off.t"
 fi
 # shellcheck disable=SC2086
 grep -o -h -E '[0-9]+:(positive|negative|boundary|corner)' $files \
     | awk -F: '{ n[$1 " " $2]++ }
-        END { for (p = 1; p <= 13; p++)
+        END { for (p = 1; p <= 19; p++)
                 printf "%d | %d | %d | %d | %d\n", p, n[p " positive"],
                     n[p " negative"], n[p " boundary"], n[p " corner"] }'
 

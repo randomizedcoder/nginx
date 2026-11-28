@@ -1,0 +1,13 @@
+Problem 15: after a 304 only the times are written back, not the header block.
+--- a/src/http/ngx_http_file_cache.c
++++ b/src/http/ngx_http_file_cache.c
+@@ -1743,7 +1743,8 @@
+                                  c->fine_window, c->fine_error,
+                                  c->fine_offset);
+ 
+-            (void) ngx_write_file(&file, c->buf->pos, c->body_start, 0);
++            (void) ngx_write_file(&file, c->buf->pos,
++                                  sizeof(ngx_http_file_cache_header_t), 0);
+ 
+             ngx_shmtx_lock(&c->file_cache->shpool->mutex);
+             c->node->valid_sec = c->valid_sec;

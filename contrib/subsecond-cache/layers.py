@@ -85,7 +85,8 @@ def origin_conf(listen, paths):
     }}"""
 
 
-def cache_conf(listen, upstream, mode):
+def cache_conf(listen, upstream, mode, lock=False):
+    lock = "proxy_cache_lock on;" if lock else ""
     return f"""
     access_log logs/access.log stamp buffer=1m flush=500ms;
     proxy_cache_path cache keys_zone=layer:8m;
@@ -99,6 +100,7 @@ def cache_conf(listen, upstream, mode):
             proxy_cache layer;
             proxy_cache_fine_time {mode};
             proxy_cache_fine_age_header on;
+            {lock}
         }}
     }}"""
 
@@ -212,6 +214,8 @@ def main():
     p.add_argument("--modes",
                    help="proxy_cache_fine_time of each cache, origin side "
                         "first, comma separated; for misconfiguration runs")
+    p.add_argument("--lock", action="store_true",
+                   help="proxy_cache_lock on in every cache")
     p.add_argument("--output", type=Path)
     args = p.parse_args()
     if min(args.layers, args.seconds, args.connections, args.fine_ms) < 1:
@@ -276,7 +280,7 @@ def main():
             stack.enter_context(server(
                 root / f"cache{i}", binary, host, args.port,
                 cache_conf(f"{host}:{args.port}", upstreams[i - 1],
-                           modes[i - 1])))
+                           modes[i - 1], args.lock)))
 
         begin = time.time() + WARMUP
         end = begin + args.seconds
@@ -305,6 +309,7 @@ def main():
         {"layers": args.layers, "seconds": args.seconds,
          "connections": args.connections, "delays_ms": delays,
          "modes": modes,
+         "lock": args.lock,
          "results": results}, indent=2))
     print(f"Staleness in ms of responses leaving {names[-1]}, {args.seconds} s, "
           f"{args.connections} connections per path, "

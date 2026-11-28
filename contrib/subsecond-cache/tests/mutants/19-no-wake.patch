@@ -1,0 +1,12 @@
+Problem 19: a fetch that ends does not wake the requests waiting for it.
+--- a/src/http/ngx_http_file_cache.c
++++ b/src/http/ngx_http_file_cache.c
+@@ -492,7 +492,7 @@
+     ngx_queue_t       *q;
+     ngx_http_cache_t  *c;
+ 
+-    if (ngx_http_file_cache_waiters.next == NULL) {
++    if (ngx_http_file_cache_waiters.next == NULL || 1) {
+         return;
+     }
+ 

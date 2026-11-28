@@ -1,0 +1,14 @@
+Problem 18: Age-Ms goes to every recipient of a location, whatever the variable says.
+--- a/src/http/ngx_http_cache_fine.c
++++ b/src/http/ngx_http_cache_fine.c
+@@ -768,9 +768,7 @@
+             return NGX_ERROR;
+         }
+ 
+-        if (!ngx_http_cache_fine_enabled(wanted.data, wanted.len)) {
+-            return NGX_OK;
+-        }
++        (void) wanted;
+     }
+ 
+     return ngx_http_fine_add(r, fine, age);

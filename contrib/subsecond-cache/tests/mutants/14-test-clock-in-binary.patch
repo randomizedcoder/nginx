@@ -1,0 +1,15 @@
+Problem 14: the fixed clock of the unit tests is compiled into nginx.
+--- a/src/http/ngx_http_cache_fine.c
++++ b/src/http/ngx_http_cache_fine.c
+@@ -29,10 +29,8 @@
+ };
+ 
+ 
+-#if (NGX_HTTP_CACHE_FINE_TEST)
+-/* Unit tests set this to supply a fixed clock.  Not in a normal build. */
++/* Unit tests set this to supply a fixed clock. */
+ ngx_uint_t  ngx_http_cache_fine_fixed_clock;
+-#endif
+ 
+ 
+ /*

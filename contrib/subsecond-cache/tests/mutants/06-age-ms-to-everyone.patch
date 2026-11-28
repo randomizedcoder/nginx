@@ -1,12 +1,27 @@
 Pitfall 6: send Age-Ms whenever there is a fine age.
 --- a/src/http/ngx_http_cache_fine.c
 +++ b/src/http/ngx_http_cache_fine.c
-@@ -589,9 +589,5 @@
+@@ -754,24 +754,5 @@
          return NGX_ERROR;
      }
  
 -    if (!u->conf->cache_fine_age_header) {
 -        return NGX_OK;
+-    }
+-
+-    if (u->conf->cache_fine_age_header_value) {
+-        ngx_str_t  wanted;
+-
+-        if (ngx_http_complex_value(r, u->conf->cache_fine_age_header_value,
+-                                   &wanted)
+-            != NGX_OK)
+-        {
+-            return NGX_ERROR;
+-        }
+-
+-        if (!ngx_http_cache_fine_enabled(wanted.data, wanted.len)) {
+-            return NGX_OK;
+-        }
 -    }
 -
      return ngx_http_fine_add(r, fine, age);

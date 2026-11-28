@@ -6,12 +6,17 @@ trap 'rm -rf "$dir"' EXIT
 tests=contrib/subsecond-cache/tests
 cat > "$dir/tests.mk" <<'MAKE'
 include objs/Makefile
-OBJECTS = $$(find objs -name '*.o' ! -path objs/src/core/nginx.o)
+# The test copy of the fine cache code has the fixed clock; the built one
+# does not.
+FINE = -DNGX_HTTP_CACHE_FINE_TEST=1
+OBJECTS = $$(find objs -name '*.o' ! -path objs/src/core/nginx.o \
+    ! -path objs/src/http/ngx_http_cache_fine.o) $(TMP)/fine.o
 fine-tests:
 	$(CC) $(CFLAGS) $(ALL_INCS) $(TESTS)/deadlines.c -o $(TMP)/deadlines
 	$(CC) $(CFLAGS) $(ALL_INCS) -Dmain=ngx_test_unused_main -c src/core/nginx.c -o $(TMP)/nginx.o
-	$(CC) $(CFLAGS) $(ALL_INCS) $(TESTS)/clock.c $(TMP)/nginx.o $(OBJECTS) $(DEAD_STRIP) $(TEST_LIBS) -o $(TMP)/clock
-	$(CC) $(CFLAGS) $(ALL_INCS) $(TESTS)/headers.c $(TMP)/nginx.o $(OBJECTS) $(DEAD_STRIP) $(TEST_LIBS) -o $(TMP)/headers
+	$(CC) $(CFLAGS) $(ALL_INCS) $(FINE) -c src/http/ngx_http_cache_fine.c -o $(TMP)/fine.o
+	$(CC) $(CFLAGS) $(ALL_INCS) $(FINE) $(TESTS)/clock.c $(TMP)/nginx.o $(OBJECTS) $(DEAD_STRIP) $(TEST_LIBS) -o $(TMP)/clock
+	$(CC) $(CFLAGS) $(ALL_INCS) $(FINE) $(TESTS)/headers.c $(TMP)/nginx.o $(OBJECTS) $(DEAD_STRIP) $(TEST_LIBS) -o $(TMP)/headers
 MAKE
 case $(uname) in Darwin) strip=-Wl,-dead_strip ;; *) strip=-Wl,--gc-sections ;; esac
 libs=${TEST_LIBS:-$(grep -m1 -- '-lz' objs/Makefile | tr -d '\\\t')}
@@ -25,4 +30,7 @@ status=0
 FINE_HEADERS_BINARY="$dir/headers" prove -v "$tests/headers.t" || status=1
 FINE_NGINX_BINARY=objs/nginx prove -v "$tests/monotonic.t" || status=1
 FINE_NGINX_BINARY=objs/nginx prove -v "$tests/zones.t" || status=1
+FINE_NGINX_BINARY=objs/nginx prove -v "$tests/agevalue.t" || status=1
+FINE_NGINX_BINARY=objs/nginx FINE_HEADERS_BINARY="$dir/headers" \
+    prove -v "$tests/symbols.t" || status=1
 exit $status

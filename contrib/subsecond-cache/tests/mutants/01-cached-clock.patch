@@ -1,13 +1,17 @@
 Pitfall 1: use the time nginx stored earlier, instead of reading the clock.
 --- a/src/http/ngx_http_cache_fine.c
 +++ b/src/http/ngx_http_cache_fine.c
-@@ -44,10 +44,6 @@
+@@ -46,14 +46,6 @@
  {
      ngx_time_t  *tp;
  
+-#if (NGX_HTTP_CACHE_FINE_TEST)
 -    if (!ngx_http_cache_fine_fixed_clock) {
 -        ngx_time_update();
 -    }
+-#else
+-    ngx_time_update();
+-#endif
 -
      tp = ngx_timeofday();
      return (int64_t) tp->sec * 1000 + tp->msec;
